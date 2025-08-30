@@ -7,14 +7,14 @@ from .models import User, PasswordResetRequest
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     list_display = (
-    'id','email', 'full_name', 'role', 'is_approved', 'is_active', 'is_staff', 'created_at', 'avatar_preview')
+    'id','email', 'name','second_name', 'role', 'is_approved', 'is_active', 'is_staff', 'created_at', 'avatar_preview')
     list_filter = ('role', 'is_approved', 'is_active', 'is_staff', 'created_at')
-    search_fields = ('email', 'full_name', 'phone')
+    search_fields = ('email', 'name','second_name', 'phone')
     ordering = ('-created_at',)
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
-        ('Персональная информация', {'fields': ('full_name', 'phone', 'avatar')}),
+        ('Персональная информация', {'fields': ('name','second_name', 'phone', 'avatar')}),
         ('Роль и права', {'fields': ('role', 'is_approved', 'is_active', 'is_staff', 'is_superuser')}),
         ('Группы и права', {'fields': ('groups', 'user_permissions')}),
         ('Важные даты', {'fields': ('last_login', 'created_at', 'updated_at')}),
@@ -23,7 +23,7 @@ class UserAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'full_name', 'phone', 'role', 'password1', 'password2', 'is_approved'),
+            'fields': ('email', 'name','second_name', 'phone', 'role', 'password1', 'password2', 'is_approved'),
         }),
     )
 

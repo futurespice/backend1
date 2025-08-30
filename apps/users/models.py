@@ -22,11 +22,12 @@ class User(AbstractBaseUser, PermissionsMixin):
         unique=True,
         validators=[RegexValidator(r'^\+?[0-9]{10,15}$')]
     )
-    full_name = models.CharField(
+    name = models.CharField(
         max_length=100,
-        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'ФИО должно содержать только буквы')]
-    )
-
+        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'ФИО должно содержать только буквы')])
+    second_name = models.CharField(
+        max_length=100,
+        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'Фамилия должно содержать только буквы')])
     # Роль и статусы
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='store')
     is_approved = models.BooleanField(default=False)

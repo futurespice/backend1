@@ -14,7 +14,7 @@ class EmailService:
         try:
             subject = 'Код для сброса пароля - B2B Система'
             message = f"""
-Здравствуйте, {user.full_name}!
+Здравствуйте, {user.name}!
 
 Вы запросили сброс пароля для вашего аккаунта в B2B системе.
 
@@ -47,7 +47,7 @@ class EmailService:
             if is_approved:
                 subject = 'Ваша заявка одобрена - B2B Система'
                 message = f"""
-Здравствуйте, {user.full_name}!
+Здравствуйте, {user.name}!
 
 Ваша заявка на регистрацию в B2B системе была одобрена.
 
@@ -58,7 +58,7 @@ class EmailService:
             else:
                 subject = 'Ваша заявка отклонена - B2B Система'
                 message = f"""
-Здравствуйте, {user.full_name}!
+Здравствуйте, {user.name}!
 
 К сожалению, ваша заявка на регистрацию в B2B системе была отклонена.
 
@@ -88,7 +88,7 @@ class EmailService:
 
             if user.role == 'partner':
                 message = f"""
-Здравствуйте, {user.full_name}!
+Здравствуйте, {user.name}!
 
 Спасибо за регистрацию в нашей B2B системе.
 
@@ -97,7 +97,7 @@ class EmailService:
                 """
             else:
                 message = f"""
-Здравствуйте, {user.full_name}!
+Здравствуйте, {user.name}!
 
 Спасибо за регистрацию в нашей B2B системе.
 
