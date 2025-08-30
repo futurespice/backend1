@@ -21,6 +21,7 @@ urlpatterns = [
 
     # Сброс пароля
     path('password-reset/', views.PasswordResetRequestView.as_view(), name='password_reset'),
+    path('password-reset/check-code/', views.PasswordResetCodeCheckView.as_view(), name='password_reset_check_code'),
     path('password-reset-confirm/', views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
 
     # Подключаем роутер (админские API)

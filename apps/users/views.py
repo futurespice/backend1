@@ -13,7 +13,7 @@ from .serializers import (
     PasswordResetConfirmSerializer,
     UserProfileSerializer,
     UserListSerializer,
-    UserModerationSerializer
+    UserModerationSerializer, PasswordResetCodeSerializer
 )
 from .permissions import IsAdminUser
 
@@ -37,7 +37,8 @@ class UserRegistrationView(generics.CreateAPIView):
             'user': {
                 'id': user.id,
                 'email': user.email,
-                'full_name': user.full_name,
+                'name': user.name,
+                'second_name': user.second_name,
                 'role': user.role,
                 'is_approved': user.is_approved
             },
@@ -70,7 +71,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                 response.data['user'] = {
                     'id': user.id,
                     'email': user.email,
-                    'full_name': user.full_name,
+                    'name': user.name,
+                    'second_name': user.second_name,
                     'role': user.role,
                     'avatar': user.avatar.url if user.avatar else None
                 }
@@ -100,7 +102,7 @@ class AdminUserViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['role', 'is_approved', 'is_active']
-    search_fields = ['email', 'full_name', 'phone']
+    search_fields = ['email','name','second_name', 'phone']
     ordering_fields = ['created_at', 'email', 'full_name']
     ordering = ['-created_at']
 
@@ -202,6 +204,15 @@ class PasswordResetRequestView(generics.CreateAPIView):
         }, status=status.HTTP_200_OK)
 
 
+class PasswordResetCodeCheckView(generics.GenericAPIView):
+    """Проверка валидности кода сброса"""
+    serializer_class = PasswordResetCodeSerializer
+    permission_classes = [AllowAny]
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response({'message': 'Код подтверждён'}, status=status.HTTP_200_OK)
+
 class PasswordResetConfirmView(generics.GenericAPIView):
     """Подтверждение сброса пароля"""
     serializer_class = PasswordResetConfirmSerializer
@@ -210,12 +221,8 @@ class PasswordResetConfirmView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-
-        return Response({
-            'message': 'Пароль успешно изменён'
-        }, status=status.HTTP_200_OK)
-
+        serializer.save()
+        return Response({'message': 'Пароль успешно изменён'}, status=status.HTTP_200_OK)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])

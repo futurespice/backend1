@@ -20,7 +20,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('email', 'phone', 'full_name', 'password', 'password_confirm')
+        fields = ('email', 'phone','name','second_name', 'password', 'password_confirm')
 
     def validate_email(self, value):
         """Проверка формата и уникальности email"""
@@ -65,7 +65,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'phone', 'full_name', 'role',
+        fields = ('id', 'email', 'phone', 'name','second_name', 'role',
                   'avatar', 'is_approved', 'is_active', 'created_at')
         read_only_fields = ('id', 'role', 'is_approved', 'created_at')
 
@@ -88,7 +88,7 @@ class UserListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'full_name', 'phone', 'role', 'is_approved',
+        fields = ('id', 'email', 'name','second_name', 'phone', 'role', 'is_approved',
                   'is_active', 'avatar', 'created_at')
 
 
@@ -116,13 +116,13 @@ class UserModerationSerializer(serializers.ModelSerializer):
 class PasswordResetRequestSerializer(serializers.Serializer):
     """Запрос на сброс пароля"""
 
-    contact = serializers.CharField()  # email или phone
+    email = serializers.CharField()  # email
 
     def validate_contact(self, value):
         """Проверяем существование пользователя"""
         try:
             user = User.objects.get(
-                models.Q(email=value) | models.Q(phone=value)
+                models.Q(email=value)
             )
             return value
         except User.DoesNotExist:
@@ -130,11 +130,11 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         """Создание запроса на сброс пароля"""
-        contact = validated_data['contact']
+        email = validated_data['email']
 
         # Находим пользователя
         user = User.objects.get(
-            models.Q(email=contact) | models.Q(phone=contact)
+            models.Q(email=email)
         )
 
         # Генерируем 5-значный код
@@ -153,15 +153,11 @@ class PasswordResetRequestSerializer(serializers.Serializer):
         return reset_request
 
 
-class PasswordResetConfirmSerializer(serializers.Serializer):
-    """Подтверждение сброса пароля"""
-
+class PasswordResetCodeSerializer(serializers.Serializer):
+    """Проверка кода сброса"""
     code = serializers.CharField(max_length=5, min_length=5)
-    new_password = serializers.CharField(min_length=6)
-    new_password_confirm = serializers.CharField(min_length=6)
 
     def validate_code(self, value):
-        """Проверка кода сброса"""
         try:
             reset_request = PasswordResetRequest.objects.get(
                 code=value,
@@ -172,29 +168,25 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         except PasswordResetRequest.DoesNotExist:
             raise serializers.ValidationError("Неверный или истёкший код")
 
-    def validate(self, attrs):
-        """Проверка совпадения паролей"""
-        if attrs['new_password'] != attrs['new_password_confirm']:
-            raise serializers.ValidationError("Пароли не совпадают")
-        return attrs
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    """Сброс пароля по коду"""
+    code = serializers.CharField(max_length=5, min_length=5)
+    new_password = serializers.CharField(min_length=6)
 
     def save(self):
-        """Сброс пароля"""
         code = self.validated_data['code']
         new_password = self.validated_data['new_password']
 
-        # Находим запрос
         reset_request = PasswordResetRequest.objects.get(
             code=code,
             is_used=False
         )
 
-        # Меняем пароль (без логики маркеров при сбросе)
         user = reset_request.user
         user.set_password(new_password)
         user.save()
 
-        # Отмечаем запрос как использованный
         reset_request.is_used = True
         reset_request.save()
 
