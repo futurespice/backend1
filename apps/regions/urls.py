@@ -3,8 +3,8 @@ from rest_framework.routers import DefaultRouter
 from . import views
 
 router = DefaultRouter()
-router.register(r'categories', views.ProductCategoryViewSet)
-router.register(r'', views.ProductViewSet)  # Товары на корневом уровне
+router.register(r'regions', views.RegionViewSet)
+router.register(r'cities', views.CityViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

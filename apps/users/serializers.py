@@ -10,17 +10,14 @@ from datetime import timedelta
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
-    """
-    Сериализатор для регистрации пользователей
-    Вся логика с маркерами обрабатывается в UserManager
-    """
+    """Сериализатор для регистрации пользователей"""
 
     password = serializers.CharField(write_only=True, min_length=6)
     password_confirm = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ('email', 'phone','name','second_name', 'password', 'password_confirm')
+        fields = ('email', 'phone', 'name', 'second_name', 'password', 'password_confirm')
 
     def validate_email(self, value):
         """Проверка формата и уникальности email"""
@@ -32,23 +29,32 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
         return value.lower()
 
-    def validate_full_name(self, value):
-        """Проверка длины ФИО"""
-        if len(value) < 15 or len(value) > 24:
-            raise serializers.ValidationError("ФИО должно содержать от 15 до 24 символов")
-        return value.title()  # Приводим к правильному регистру
+    def validate_name(self, value):
+        """Проверка имени"""
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("Имя должно содержать минимум 2 символа")
+        return value.title()
+
+    def validate_second_name(self, value):
+        """Проверка фамилии"""
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("Фамилия должна содержать минимум 2 символа")
+        return value.title()
 
     def validate(self, attrs):
         """Проверка совпадения паролей"""
         if attrs['password'] != attrs['password_confirm']:
             raise serializers.ValidationError("Пароли не совпадают")
+
+        # Проверка общей длины ФИО (15-24 символа по ТЗ)
+        full_name_length = len(attrs['name']) + len(attrs['second_name']) + 1  # +1 за пробел
+        if full_name_length < 15 or full_name_length > 24:
+            raise serializers.ValidationError("ФИО должно содержать от 15 до 24 символов")
+
         return attrs
 
     def create(self, validated_data):
-        """
-        Создание пользователя через UserManager
-        Менеджер сам обработает логику с маркерами
-        """
+        """Создание пользователя через UserManager"""
         validated_data.pop('password_confirm')
 
         # UserManager.create_user автоматически определит роль и очистит пароль
@@ -61,11 +67,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    """Сериализатор профиля пользователя с возможностью загрузки аватара"""
+    """Сериализатор профиля пользователя"""
+    full_name = serializers.ReadOnlyField()
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'phone', 'name','second_name', 'role',
+        fields = ('id', 'email', 'phone', 'name', 'second_name', 'full_name', 'role',
                   'avatar', 'is_approved', 'is_active', 'created_at')
         read_only_fields = ('id', 'role', 'is_approved', 'created_at')
 
@@ -85,11 +92,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserListSerializer(serializers.ModelSerializer):
     """Сериализатор для списка пользователей (для админа)"""
+    full_name = serializers.ReadOnlyField()
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'name','second_name', 'phone', 'role', 'is_approved',
-                  'is_active', 'avatar', 'created_at')
+        fields = ('id', 'email', 'name', 'second_name', 'full_name', 'phone', 'role',
+                  'is_approved', 'is_active', 'avatar', 'created_at')
 
 
 class UserModerationSerializer(serializers.ModelSerializer):
@@ -115,27 +123,20 @@ class UserModerationSerializer(serializers.ModelSerializer):
 
 class PasswordResetRequestSerializer(serializers.Serializer):
     """Запрос на сброс пароля"""
+    email = serializers.EmailField()
 
-    email = serializers.CharField()  # email
-
-    def validate_contact(self, value):
+    def validate_email(self, value):
         """Проверяем существование пользователя"""
         try:
-            user = User.objects.get(
-                models.Q(email=value)
-            )
+            user = User.objects.get(email=value)
             return value
         except User.DoesNotExist:
-            raise serializers.ValidationError("Пользователь с такими данными не найден")
+            raise serializers.ValidationError("Пользователь с таким email не найден")
 
     def create(self, validated_data):
         """Создание запроса на сброс пароля"""
         email = validated_data['email']
-
-        # Находим пользователя
-        user = User.objects.get(
-            models.Q(email=email)
-        )
+        user = User.objects.get(email=email)
 
         # Генерируем 5-значный код
         code = str(random.randint(10000, 99999))
@@ -173,6 +174,17 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     """Сброс пароля по коду"""
     code = serializers.CharField(max_length=5, min_length=5)
     new_password = serializers.CharField(min_length=6)
+
+    def validate_code(self, value):
+        try:
+            reset_request = PasswordResetRequest.objects.get(
+                code=value,
+                is_used=False,
+                expires_at__gt=timezone.now()
+            )
+            return value
+        except PasswordResetRequest.DoesNotExist:
+            raise serializers.ValidationError("Неверный или истёкший код")
 
     def save(self):
         code = self.validated_data['code']
