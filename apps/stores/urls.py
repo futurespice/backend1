@@ -3,8 +3,7 @@ from rest_framework.routers import DefaultRouter
 from . import views
 
 router = DefaultRouter()
-router.register(r'categories', views.ProductCategoryViewSet)
-router.register(r'', views.ProductViewSet)  # Товары на корневом уровне
+router.register(r'', views.StoreViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

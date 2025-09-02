@@ -7,14 +7,15 @@ from .models import User, PasswordResetRequest
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     list_display = (
-    'id','email', 'name','second_name', 'role', 'is_approved', 'is_active', 'is_staff', 'created_at', 'avatar_preview')
+        'id', 'email', 'full_name', 'role', 'is_approved', 'is_active', 'is_staff', 'created_at', 'avatar_preview'
+    )
     list_filter = ('role', 'is_approved', 'is_active', 'is_staff', 'created_at')
-    search_fields = ('email', 'name','second_name', 'phone')
+    search_fields = ('email', 'name', 'second_name', 'phone')
     ordering = ('-created_at',)
 
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
-        ('Персональная информация', {'fields': ('name','second_name', 'phone', 'avatar')}),
+        ('Персональная информация', {'fields': ('name', 'second_name', 'phone', 'avatar')}),
         ('Роль и права', {'fields': ('role', 'is_approved', 'is_active', 'is_staff', 'is_superuser')}),
         ('Группы и права', {'fields': ('groups', 'user_permissions')}),
         ('Важные даты', {'fields': ('last_login', 'created_at', 'updated_at')}),
@@ -23,17 +24,20 @@ class UserAdmin(BaseUserAdmin):
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'name','second_name', 'phone', 'role', 'password1', 'password2', 'is_approved'),
+            'fields': ('email', 'name', 'second_name', 'phone', 'role', 'password1', 'password2', 'is_approved'),
         }),
     )
 
     readonly_fields = ('created_at', 'updated_at', 'last_login')
 
+    def full_name(self, obj):
+        return obj.full_name
+    full_name.short_description = "ФИО"
+
     def avatar_preview(self, obj):
         if obj.avatar:
             return format_html('<img src="{}" width="50" height="50" style="border-radius: 50%;" />', obj.avatar.url)
         return "Нет фото"
-
     avatar_preview.short_description = "Аватар"
 
     actions = ['approve_users', 'reject_users', 'block_users', 'unblock_users']
@@ -41,25 +45,21 @@ class UserAdmin(BaseUserAdmin):
     def approve_users(self, request, queryset):
         updated = queryset.update(is_approved=True)
         self.message_user(request, f'{updated} пользователей одобрено.')
-
     approve_users.short_description = "Одобрить выбранных пользователей"
 
     def reject_users(self, request, queryset):
         updated = queryset.update(is_approved=False)
         self.message_user(request, f'{updated} пользователей отклонено.')
-
     reject_users.short_description = "Отклонить выбранных пользователей"
 
     def block_users(self, request, queryset):
         updated = queryset.update(is_active=False)
         self.message_user(request, f'{updated} пользователей заблокировано.')
-
     block_users.short_description = "Заблокировать выбранных пользователей"
 
     def unblock_users(self, request, queryset):
         updated = queryset.update(is_active=True)
         self.message_user(request, f'{updated} пользователей разблокировано.')
-
     unblock_users.short_description = "Разблокировать выбранных пользователей"
 
 

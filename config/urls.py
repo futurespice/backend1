@@ -31,8 +31,8 @@ urlpatterns = [
 
     # API Routes
     path('api/auth/', include('users.urls')),
-    # path('api/products/', include('apps.products.urls')),
-    # path('api/stores/', include('apps.stores.urls')),
+    path('api/products/', include('products.urls')),
+    path('api/stores/', include('stores.urls')),
     # path('api/orders/', include('apps.orders.urls')),
     # path('api/debts/', include('apps.debts.urls')),
     # path('api/bonuses/', include('apps.bonuses.urls')),
@@ -41,7 +41,7 @@ urlpatterns = [
     # path('api/messaging/', include('apps.messaging.urls')),
     # path('api/tracking/', include('apps.tracking.urls')),
     # path('api/requests/', include('apps.support_requests.urls')),
-    # path('api/regions/', include('apps.regions.urls')),
+    path('api/regions/', include('regions.urls')),
 ]
 
 # Serve media files in development

@@ -24,10 +24,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
     name = models.CharField(
         max_length=100,
-        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'ФИО должно содержать только буквы')])
+        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'Имя должно содержать только буквы')]
+    )
     second_name = models.CharField(
         max_length=100,
-        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'Фамилия должно содержать только буквы')])
+        validators=[RegexValidator(r'^[a-zA-Zа-яА-Я\s]+$', 'Фамилия должна содержать только буквы')]
+    )
+
     # Роль и статусы
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='store')
     is_approved = models.BooleanField(default=False)
@@ -42,8 +45,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     updated_at = models.DateTimeField(auto_now=True)
 
     # Настройки для AbstractBaseUser
-    USERNAME_FIELD = 'email'  # Вход по email
-    REQUIRED_FIELDS = ['phone', 'full_name']  # Поля обязательные при создании суперпользователя
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['phone', 'name', 'second_name']
 
     # Подключаем кастомный менеджер
     objects = UserManager()
@@ -56,6 +59,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.email} ({self.get_role_display()})"
 
+    @property
+    def full_name(self):
+        return f"{self.name} {self.second_name}".strip()
+
     def is_partner(self):
         return self.role == 'partner'
 
@@ -64,7 +71,6 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def is_admin_user(self):
         return self.role == 'admin'
-
 
 class PasswordResetRequest(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
