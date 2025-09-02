@@ -16,11 +16,31 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='user',
             name='name',
-            preserve_default=False,
+            field=models.CharField(
+                max_length=100,
+                validators=[
+                    django.core.validators.RegexValidator(
+                        r'^[a-zA-Zа-яА-Я\s]+$',
+                        'Имя должно содержать только буквы'
+                    )
+                ],
+                default='',  # временно для миграции существующих строк
+            ),
+            preserve_default=False,  # после миграции дефолт уберётся
         ),
         migrations.AddField(
             model_name='user',
             name='second_name',
+            field=models.CharField(
+                max_length=100,
+                validators=[
+                    django.core.validators.RegexValidator(
+                        r'^[a-zA-Zа-яА-Я\s]+$',
+                        'Фамилия должна содержать только буквы'
+                    )
+                ],
+                default='',
+            ),
             preserve_default=False,
         ),
     ]
