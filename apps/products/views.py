@@ -1,42 +1,42 @@
 from decimal import Decimal
-
 from django.db import models
-from django.db.models import Count, Q, F, ExpressionWrapper, DecimalField, Case, When
+from django.db.models import Q, F, Count
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import (
-    Product, ProductCategory, ProductImage, ProductBOM,
-    Expense, ExpenseValue, ExpenseBinding, Unit
-)
+from .models import Product, ProductCategory, ProductImage, ProductBOM
 from .serializers import (
-    # products
     ProductListSerializer, ProductDetailSerializer, ProductCreateUpdateSerializer,
-    ProductCategorySerializer, ProductPriceCalculationSerializer,
-    ProductStockUpdateSerializer, ProductRequestSerializer,
-    # bom
-    ProductBOMItemSerializer, ProductBOMItemWriteSerializer,
-    # expenses (если понадобятся публичные CRUD)
-    ExpenseSerializer, ExpenseValueSerializer, ExpenseBindingSerializer,
+    ProductCategorySerializer, ProductImageSerializer,
+    ProductStockUpdateSerializer, ProductRequestSerializer
 )
 from .filters import ProductFilter
 from users.permissions import IsPartnerUser, IsAdminUser, IsStoreUser
 
 
-# ---------- Категории ----------
-class ProductCategoryViewSet(viewsets.ReadOnlyModelViewSet):
+class ProductCategoryViewSet(viewsets.ModelViewSet):
+    """Категории товаров"""
     queryset = ProductCategory.objects.filter(is_active=True)
     serializer_class = ProductCategorySerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["name"]
+    ordering_fields = ["name", "created_at"]
     ordering = ["name"]
 
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdminUser()]
+        return [permissions.IsAuthenticated()]
 
-# ---------- Товары ----------
+
 class ProductViewSet(viewsets.ModelViewSet):
+    """
+    Товары с интеграцией в систему расчета себестоимости.
+    Убрана дублирующая логика BOM и расходов - теперь через cost_accounting.
+    """
     queryset = Product.objects.select_related("category").prefetch_related("images")
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -60,194 +60,345 @@ class ProductViewSet(viewsets.ModelViewSet):
         return qs
 
     def get_permissions(self):
-        if self.action in ["create", "update", "partial_update", "destroy", "update_stock",
-                           "bom_add", "bom_update", "bom_delete"]:
-            classes = [IsAdminUser]
-        elif self.action in ["calculate_price", "request_products"]:
-            classes = [IsPartnerUser | IsStoreUser]
-        else:
-            classes = [permissions.IsAuthenticated]
-        return [c() for c in classes]
+        if self.action in ["create", "update", "partial_update", "destroy", "update_stock"]:
+            return [IsAdminUser()]
+        elif self.action in ["request_products"]:
+            return [IsPartnerUser() | IsStoreUser()]
+        return [permissions.IsAuthenticated()]
 
-    # --- Цены/бонусы/остатки ---
+    @action(detail=True, methods=["patch"], permission_classes=[IsAdminUser])
+    def update_stock(self, request, pk=None):
+        """Обновление остатков на складе"""
+        product = self.get_object()
+        serializer = ProductStockUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        quantity = serializer.validated_data["quantity"]
+        operation = serializer.validated_data["operation"]
+
+        try:
+            old_stock = product.stock_quantity
+            product.update_stock(quantity, operation)
+
+            return Response({
+                "message": f"Остаток обновлен: {old_stock} → {product.stock_quantity}",
+                "old_stock": float(old_stock),
+                "new_stock": float(product.stock_quantity),
+                "operation": operation,
+                "quantity": float(quantity)
+            })
+        except ValueError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     @action(detail=True, methods=["post"])
     def calculate_price(self, request, pk=None):
+        """Расчет цены для конкретного количества"""
         product = self.get_object()
-        ser = ProductPriceCalculationSerializer(data=request.data, context={"product": product})
-        if not ser.is_valid():
-            return Response(ser.errors, status=400)
+        quantity = request.data.get("quantity")
 
-        q = ser.validated_data["quantity"]
-        total = product.calc_line_total(q)
-
-        # Для штучных сразу отдадим инфо по бонусу
-        bonus_info = None
-        if not product.is_weight and product.is_bonus_eligible:
-            payable, bonus = product.split_bonus(int(q))
-            bonus_info = {"requested_qty": int(q), "payable_qty": payable, "bonus_qty": bonus}
-
-        return Response({
-            "product_id": product.id,
-            "product_name": product.name,
-            "quantity": q,
-            "unit_price": product.price,
-            "price_per_100g": product.price_per_100g,
-            "total_price": total,
-            "category_type": product.category_type,
-            "bonus": bonus_info,
-        })
-
-    @action(detail=True, methods=["post"])
-    def split_bonus(self, request, pk=None):
-        """Вернёт (payable_qty, bonus_qty) для штучных; для весовых — пусто."""
-        product = self.get_object()
-        if product.is_weight or not product.is_bonus_eligible:
-            return Response({"payable_qty": int(request.data.get("quantity", 0)), "bonus_qty": 0})
+        if quantity is None:
+            return Response(
+                {"error": "Нужен параметр quantity"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
-            qty = int(Decimal(str(request.data.get("quantity", 0))))
-        except Exception:
-            return Response({"detail": "quantity должен быть целым числом"}, status=400)
+            quantity = Decimal(str(quantity))
+            if quantity <= 0:
+                raise ValueError("Количество должно быть больше 0")
 
-        payable, bonus = product.split_bonus(qty)
-        return Response({"payable_qty": payable, "bonus_qty": bonus})
+            # Проверяем минимальный заказ и шаги
+            if product.is_weight:
+                if quantity < product.min_order_quantity:
+                    return Response({
+                        "error": f"Минимальный заказ: {product.min_order_quantity} кг"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=True, methods=["post"])
-    def update_stock(self, request, pk=None):
-        """Изменение остатка (с валидацией шага 0.1 для весовых). Только админ в get_permissions()."""
-        product = self.get_object()
-        ser = ProductStockUpdateSerializer(data=request.data, context={"product": product})
-        if not ser.is_valid():
-            return Response(ser.errors, status=400)
+                if quantity % Decimal('0.1') != 0:
+                    return Response({
+                        "error": "Для весовых товаров шаг 0.1 кг"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                if quantity < 1 or quantity % 1 != 0:
+                    return Response({
+                        "error": "Для штучных товаров минимум 1 шт, только целые числа"
+                    }, status=status.HTTP_400_BAD_REQUEST)
 
-        qty = ser.validated_data["quantity"]
-        op = ser.validated_data["operation"]
-        reason = ser.validated_data.get("reason", "")
+            total_price = product.calculate_price(quantity)
 
-        old = product.stock_quantity
-        if op == "add":
-            product.increase_stock(qty)
-        elif op == "subtract":
-            if not product.reduce_stock(qty):
-                return Response({"error": "Недостаточно товара на складе"}, status=400)
-        else:  # set
-            product.stock_quantity = qty
-            product.save()
+            response_data = {
+                "product_id": product.id,
+                "product_name": product.name,
+                "product_type": product.category_type,
+                "quantity": float(quantity),
+                "unit_price": float(product.price),
+                "total_price": float(total_price)
+            }
 
-        # TODO: если у вас есть аудит/лог — сюда интегрируйте
+            # Для штучных товаров показываем бонусы
+            if not product.is_weight and product.is_bonus_eligible:
+                payable_qty, bonus_qty = product.split_bonus(int(quantity))
+                bonus_discount = product.price * bonus_qty
+
+                response_data.update({
+                    "bonus_info": {
+                        "payable_quantity": payable_qty,
+                        "bonus_quantity": bonus_qty,
+                        "bonus_discount": float(bonus_discount),
+                        "final_price": float(total_price - bonus_discount)
+                    }
+                })
+
+            return Response(response_data)
+
+        except (ValueError, TypeError) as e:
+            return Response(
+                {"error": f"Некорректное количество: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=["post"], permission_classes=[IsPartnerUser | IsStoreUser])
+    def request_products(self, request):
+        """Запрос товаров партнером/магазином"""
+        serializer = ProductRequestSerializer(data=request.data, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        requested_items = []
+        total_amount = Decimal("0")
+
+        for item_data in serializer.validated_data:
+            product_id = item_data["product_id"]
+            quantity = item_data["quantity"]
+
+            try:
+                product = Product.objects.get(id=product_id, is_active=True, is_available=True)
+
+                # Проверяем наличие на складе
+                if not product.is_in_stock(quantity):
+                    return Response({
+                        "error": f"Недостаточно товара '{product.name}' на складе. Доступно: {product.stock_quantity}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                item_total = product.calculate_price(quantity)
+                total_amount += item_total
+
+                requested_items.append({
+                    "product_id": product.id,
+                    "product_name": product.name,
+                    "quantity": float(quantity),
+                    "unit_price": float(product.price),
+                    "total_price": float(item_total)
+                })
+
+            except Product.DoesNotExist:
+                return Response({
+                    "error": f"Товар с ID {product_id} не найден"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # TODO: Интегрировать с системой заказов/долгов
+        # Пока возвращаем расчет без создания заказа
 
         return Response({
-            "product_id": product.id,
-            "old_quantity": old,
-            "new_quantity": product.stock_quantity,
-            "operation": op,
-            "reason": reason,
+            "requested_by": request.user.id,
+            "items": requested_items,
+            "total_items": len(requested_items),
+            "total_amount": float(total_amount),
+            "status": "calculated",  # пока только расчет
+            "message": "Расчет выполнен. Интеграция с заказами в разработке."
         })
 
-    # --- Подборки/категории ---
+    @action(detail=True, methods=["get"])
+    def cost_info(self, request, pk=None):
+        """
+        Информация о себестоимости товара.
+        Интегрируется с cost_accounting модулем.
+        """
+        product = self.get_object()
+
+        # Импортируем здесь чтобы избежать циклических импортов
+        from cost_accounting.models import ProductExpense, ProductionBatch
+        from cost_accounting.models import Expense
+
+        # Получаем связанные расходы
+        product_expenses = ProductExpense.objects.filter(
+            product=product,
+            is_active=True
+        ).select_related('expense')
+
+        # Группируем по типам
+        physical_expenses = product_expenses.filter(expense__type=Expense.ExpenseType.PHYSICAL)
+        overhead_expenses = product_expenses.filter(expense__type=Expense.ExpenseType.OVERHEAD)
+
+        # Ищем Сюзерена
+        suzerain = physical_expenses.filter(expense__status=Expense.ExpenseStatus.SUZERAIN).first()
+
+        # Последний расчет себестоимости
+        latest_batch = ProductionBatch.objects.filter(product=product).order_by('-date').first()
+
+        response_data = {
+            "product_id": product.id,
+            "product_name": product.name,
+            "physical_expenses": [
+                {
+                    "expense_id": pe.expense.id,
+                    "name": pe.expense.name,
+                    "unit": pe.expense.unit,
+                    "ratio_per_unit": float(pe.ratio_per_product_unit),
+                    "current_price": float(pe.expense.price_per_unit or 0),
+                    "is_suzerain": pe.expense.status == Expense.ExpenseStatus.SUZERAIN
+                }
+                for pe in physical_expenses
+            ],
+            "overhead_expenses": [
+                {
+                    "expense_id": pe.expense.id,
+                    "name": pe.expense.name,
+                    "ratio_per_unit": float(pe.ratio_per_product_unit)
+                }
+                for pe in overhead_expenses
+            ],
+            "suzerain_expense": {
+                "id": suzerain.expense.id,
+                "name": suzerain.expense.name,
+                "ratio_per_unit": float(suzerain.ratio_per_product_unit)
+            } if suzerain else None,
+            "latest_cost_calculation": {
+                "date": latest_batch.date,
+                "cost_per_unit": float(latest_batch.cost_per_unit),
+                "physical_cost": float(latest_batch.physical_cost),
+                "overhead_cost": float(latest_batch.overhead_cost),
+                "total_cost": float(latest_batch.total_cost)
+            } if latest_batch else None
+        }
+
+        return Response(response_data)
 
     @action(detail=False, methods=["get"])
-    def categories(self, request):
-        cats = ProductCategory.objects.filter(is_active=True, products__is_active=True).distinct() \
-            .annotate(products_count=Count("products"))
-        return Response(ProductCategorySerializer(cats, many=True).data)
+    def by_category(self, request):
+        """Товары сгруппированные по категориям"""
+        categories = ProductCategory.objects.filter(is_active=True).prefetch_related(
+            models.Prefetch(
+                'products',
+                queryset=self.get_queryset().filter(is_active=True)
+            )
+        )
 
-    @action(detail=False, methods=["get"])
-    def bonus_eligible(self, request):
-        qs = self.get_queryset().filter(is_bonus_eligible=True, category_type=Unit.PIECE)
-        page = self.paginate_queryset(qs)
-        ser = ProductListSerializer(page or qs, many=True, context={"request": request})
-        return self.get_paginated_response(ser.data) if page else Response(ser.data)
+        result = []
+        for category in categories:
+            result.append({
+                "category_id": category.id,
+                "category_name": category.name,
+                "category_type": category.category_type,
+                "products": ProductListSerializer(category.products.all(), many=True).data
+            })
+
+        return Response(result)
 
     @action(detail=False, methods=["get"])
     def weight_products(self, request):
-        qs = self.get_queryset().filter(category_type=Unit.WEIGHT)
-        page = self.paginate_queryset(qs)
-        ser = ProductListSerializer(page or qs, many=True, context={"request": request})
-        return self.get_paginated_response(ser.data) if page else Response(ser.data)
+        """Только весовые товары"""
+        weight_products = self.get_queryset().filter(category_type=Product.CategoryType.WEIGHT)
+        serializer = ProductListSerializer(weight_products, many=True)
+        return Response({
+            "count": weight_products.count(),
+            "products": serializer.data
+        })
+
+    @action(detail=False, methods=["get"])
+    def bonus_eligible(self, request):
+        """Товары участвующие в бонусной программе"""
+        bonus_products = self.get_queryset().filter(
+            is_bonus_eligible=True,
+            category_type=Product.CategoryType.PIECE  # только штучные
+        )
+        serializer = ProductListSerializer(bonus_products, many=True)
+        return Response({
+            "count": bonus_products.count(),
+            "products": serializer.data
+        })
 
     @action(detail=False, methods=["get"])
     def low_stock(self, request):
-        """
-        Низкий остаток:
-        - штучные: < 10
-        - весовые: < 1.0 кг
-        """
-        qs = self.get_queryset().annotate(
-            is_low_piece=Case(
-                When(category_type=Unit.PIECE, then=Q(stock_quantity__lt=Decimal("10"))),
-                default=False, output_field=models.BooleanField()
-            ),
-            is_low_weight=Case(
-                When(category_type=Unit.WEIGHT, then=Q(stock_quantity__lt=Decimal("1.0"))),
-                default=False, output_field=models.BooleanField()
-            ),
-        ).filter(Q(is_low_piece=True) | Q(is_low_weight=True))
+        """Товары с низким остатком"""
+        threshold = Decimal(request.query_params.get('threshold', '10'))
 
-        page = self.paginate_queryset(qs)
-        ser = ProductListSerializer(page or qs, many=True, context={"request": request})
-        return self.get_paginated_response(ser.data) if page else Response(ser.data)
+        low_stock_products = self.get_queryset().filter(
+            stock_quantity__lt=threshold,
+            is_active=True
+        ).order_by('stock_quantity')
 
-    # --- BOM (ингредиенты товара) ---
+        serializer = ProductListSerializer(low_stock_products, many=True)
+        return Response({
+            "threshold": float(threshold),
+            "count": low_stock_products.count(),
+            "products": serializer.data
+        })
 
-    @action(detail=True, methods=["get"])
-    def bom(self, request, pk=None):
-        """Список ингредиентов продукта."""
-        product = self.get_object()
-        ser = ProductBOMItemSerializer(product.bom_items.all(), many=True)
-        return Response(ser.data)
 
-    @action(detail=True, methods=["post"])
-    def bom_add(self, request, pk=None):
-        """Добавить ингредиент продукту (админ)."""
-        product = self.get_object()
-        ser = ProductBOMItemWriteSerializer(data=request.data, context={"product": product})
-        if not ser.is_valid():
-            return Response(ser.errors, status=400)
-        ProductBOM.objects.create(product=product, **ser.validated_data)
-        return Response({"detail": "Ингредиент добавлен"}, status=201)
+class ProductImageViewSet(viewsets.ModelViewSet):
+    """Управление изображениями товаров"""
+    queryset = ProductImage.objects.select_related('product')
+    serializer_class = ProductImageSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['product', 'is_primary']
+    ordering = ['product', 'order', 'created_at']
 
-    @action(detail=True, methods=["put", "patch"])
-    def bom_update(self, request, pk=None):
-        """Обновить qty существующего ингредиента (админ). body: {ingredient, qty_per_unit}"""
-        product = self.get_object()
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdminUser()]
+        return [permissions.IsAuthenticated()]
+
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
+    def set_primary(self, request, pk=None):
+        """Установить изображение как основное"""
+        image = self.get_object()
+
+        # Убираем флаг у всех изображений этого товара
+        ProductImage.objects.filter(product=image.product).update(is_primary=False)
+
+        # Устанавливаем флаг для текущего
+        image.is_primary = True
+        image.save()
+
+        return Response({
+            "message": f"Изображение установлено как основное для товара '{image.product.name}'",
+            "image_id": image.id
+        })
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
+    def reorder(self, request):
+        """Изменение порядка изображений товара"""
+        product_id = request.data.get('product_id')
+        image_orders = request.data.get('image_orders')  # [{id: 1, order: 0}, {id: 2, order: 1}]
+
+        if not product_id or not image_orders:
+            return Response({
+                "error": "Нужны параметры product_id и image_orders"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            item = ProductBOM.objects.get(product=product, ingredient_id=request.data.get("ingredient"))
-        except ProductBOM.DoesNotExist:
-            return Response({"detail": "Связь product-ingredient не найдена"}, status=404)
+            product = Product.objects.get(id=product_id)
 
-        ser = ProductBOMItemWriteSerializer(item, data=request.data, partial=True, context={"product": product})
-        if not ser.is_valid():
-            return Response(ser.errors, status=400)
-        ser.save()
-        return Response(ProductBOMItemSerializer(item).data)
+            for item in image_orders:
+                ProductImage.objects.filter(
+                    id=item['id'],
+                    product=product
+                ).update(order=item['order'])
 
-    @action(detail=True, methods=["delete"])
-    def bom_delete(self, request, pk=None):
-        """Удалить ингредиент (админ). query: ?ingredient=<id>"""
-        product = self.get_object()
-        ing_id = request.query_params.get("ingredient")
-        if not ing_id:
-            return Response({"detail": "Не передан ingredient"}, status=400)
-        deleted, _ = ProductBOM.objects.filter(product=product, ingredient_id=ing_id).delete()
-        return Response(status=204 if deleted else 404)
+            return Response({
+                "message": f"Порядок изображений товара '{product.name}' обновлен",
+                "updated_count": len(image_orders)
+            })
 
-
-# ---------- (опционально) CRUD расходов ----------
-class ExpenseViewSet(viewsets.ModelViewSet):
-    queryset = Expense.objects.all()
-    serializer_class = ExpenseSerializer
-    permission_classes = [IsAdminUser]
-
-
-class ExpenseValueViewSet(viewsets.ModelViewSet):
-    queryset = ExpenseValue.objects.select_related("expense")
-    serializer_class = ExpenseValueSerializer
-    permission_classes = [IsAdminUser]
-
-
-class ExpenseBindingViewSet(viewsets.ModelViewSet):
-    queryset = ExpenseBinding.objects.select_related("expense", "product")
-    serializer_class = ExpenseBindingSerializer
-    permission_classes = [IsAdminUser]
+        except Product.DoesNotExist:
+            return Response({
+                "error": "Товар не найден"
+            }, status=status.HTTP_404_NOT_FOUND)
+        except KeyError:
+            return Response({
+                "error": "Некорректный формат image_orders"
+            }, status=status.HTTP_400_BAD_REQUEST)
