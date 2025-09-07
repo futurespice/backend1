@@ -33,6 +33,7 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'django_filters',
     'drf_spectacular',
+    "channels",
 ]
 
 LOCAL_APPS = [
@@ -82,6 +83,24 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+# ASGI/Channels
+ASGI_APPLICATION = 'config.asgi.application'
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [REDIS_URL]},
+    }
+}
+
+CHAT_ALLOWED_MIME = {
+    "image/jpeg", "image/png",
+    "application/pdf",
+    "video/mp4",
+    "audio/mpeg",
+}
+
 
 # Database
 DATABASES = {
@@ -126,6 +145,9 @@ STATICFILES_DIRS = [
 # Media files
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+FILE_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+CHAT_MAX_FILE_MB = 20
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

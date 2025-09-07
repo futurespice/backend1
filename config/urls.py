@@ -38,7 +38,7 @@ urlpatterns = [
     # path('api/bonuses/', include('apps.bonuses.urls')),
     path('api/cost-accounting/', include('cost_accounting.urls')),
     # path('api/reports/', include('apps.reports.urls')),
-    # path('api/messaging/', include('apps.messaging.urls')),
+    path('api/messaging/', include('messaging.urls')),
     # path('api/tracking/', include('apps.tracking.urls')),
     # path('api/requests/', include('apps.support_requests.urls')),
     path('api/regions/', include('regions.urls')),

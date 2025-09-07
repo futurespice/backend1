@@ -72,3 +72,6 @@ LOGGING = {
         'level': 'INFO',
     },
 }
+
+REDIS_URL = os.environ["REDIS_URL"]
+CHANNEL_LAYERS["default"]["CONFIG"]["hosts"] = [REDIS_URL]
