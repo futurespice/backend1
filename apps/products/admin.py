@@ -4,7 +4,7 @@ from django.contrib import admin, messages
 from django.db.models import Count, Q
 from django.utils.html import format_html
 
-from .models import ProductCategory, Product, ProductImage, Unit
+from .models import ProductCategory, Product, ProductImage
 
 
 # ---------- Inlines ----------
@@ -40,9 +40,11 @@ class LowStockFilter(admin.SimpleListFilter):
 
     def queryset(self, request, qs):
         if self.value() == "1":
+            # ИСПРАВЛЕНО: Используем правильные константы из Product модели
             return qs.filter(
-                (Q(category_type=Unit.PIECE) & Q(stock_quantity__lt=10) & Q(stock_quantity__gt=0)) |
-                (Q(category_type=Unit.WEIGHT) & Q(stock_quantity__lt=Decimal("1.0")) & Q(stock_quantity__gt=0))
+                (Q(category_type=Product.CategoryType.PIECE) & Q(stock_quantity__lt=10) & Q(stock_quantity__gt=0)) |
+                (Q(category_type=Product.CategoryType.WEIGHT) & Q(stock_quantity__lt=Decimal("1.0")) & Q(
+                    stock_quantity__gt=0))
             )
         return qs
 
@@ -72,119 +74,97 @@ class ProductAdmin(admin.ModelAdmin):
         "name", "category", "category_type", "price",
         "stock_quantity", "min_order_quantity",
         "price_per_100g_display",
-        "is_bonus_eligible", "is_active", "is_available", "created_at",
+        "is_bonus_eligible", "is_manufactured", "is_active", "is_available", "created_at",
     )
     list_filter = (
         "category", "category_type", LowStockFilter, InStockFilter,
-        "is_active", "is_available", "is_bonus_eligible",
+        "is_active", "is_available", "is_bonus_eligible", "is_manufactured",
     )
     search_fields = ("name", "description")
     ordering = ("-created_at",)
     autocomplete_fields = ("category",)
     readonly_fields = ("created_at", "updated_at", "price_per_100g_display")
-
-    fieldsets = (
-        ("Основное", {"fields": ("name", "description", "category", "category_type")}),
-        ("Цена и остатки", {"fields": ("price", "stock_quantity", "min_order_quantity", "price_per_100g_display")}),
-        ("Статусы", {"fields": ("is_bonus_eligible", "is_active", "is_available")}),
-        ("Системные", {"fields": ("created_at", "updated_at")}),
-    )
-
     inlines = [ProductImageInline]
 
-    # — actions —
-    actions = [
-        "activate_products", "deactivate_products",
-        "make_available", "make_unavailable",
-        "make_bonus_eligible", "make_not_bonus_eligible",
-    ]
+    fieldsets = (
+        ("Основное", {
+            "fields": ("name", "description", "category", "category_type")
+        }),
+        ("Цены и количество", {
+            "fields": ("price", "stock_quantity", "min_order_quantity")
+        }),
+        ("Производство", {
+            "fields": ("is_manufactured", "manufacturing_time_minutes"),
+            "classes": ("collapse",)
+        }),
+        ("Бонусы", {
+            "fields": ("is_bonus_eligible", "bonus_every_n"),
+            "classes": ("collapse",)
+        }),
+        ("Статусы", {
+            "fields": ("is_active", "is_available")
+        }),
+        ("Системные поля", {
+            "fields": ("created_at", "updated_at"),
+            "classes": ("collapse",)
+        }),
+    )
 
-    # показываем цену за 100 г только для весовых
-    @admin.display(description="Цена за 100 г")
-    def price_per_100g_display(self, obj: Product):
-        return obj.price_per_100g if obj.category_type == Unit.WEIGHT else "-"
-
-    # делаем поле бонусов read-only для весовых (защита в админ-форме)
-    def get_readonly_fields(self, request, obj=None):
-        ro = list(super().get_readonly_fields(request, obj))
-        if obj and obj.category_type == Unit.WEIGHT and "is_bonus_eligible" not in ro:
-            ro.append("is_bonus_eligible")
-        return ro
-
-    # оптимизируем выборку
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related("category").prefetch_related("images")
-
-    # ---- actions impl ----
-    def activate_products(self, request, qs):
-        updated = qs.update(is_active=True)
-        self.message_user(request, f"{updated} товаров активировано.", messages.SUCCESS)
-
-    activate_products.short_description = "Активировать выбранные"
-
-    def deactivate_products(self, request, qs):
-        updated = qs.update(is_active=False)
-        self.message_user(request, f"{updated} товаров деактивировано.", messages.SUCCESS)
-
-    deactivate_products.short_description = "Деактивировать выбранные"
-
-    def make_available(self, request, qs):
-        updated = qs.update(is_available=True)
-        self.message_user(request, f"{updated} товаров доступны к заказу.", messages.SUCCESS)
-
-    make_available.short_description = "Сделать доступными к заказу"
-
-    def make_unavailable(self, request, qs):
-        updated = qs.update(is_available=False)
-        self.message_user(request, f"{updated} товаров недоступны к заказу.", messages.SUCCESS)
-
-    make_unavailable.short_description = "Сделать недоступными к заказу"
-
-    def make_bonus_eligible(self, request, qs):
-        # только штучные; весовые — игнорируем
-        updated = qs.filter(category_type=Unit.PIECE).update(is_bonus_eligible=True)
-        skipped = qs.filter(category_type=Unit.WEIGHT).count()
-        msg = f"{updated} штучных товаров включены в бонусную программу."
-        if skipped:
-            msg += f" {skipped} весовых пропущены."
-        self.message_user(request, msg, messages.INFO)
-
-    make_bonus_eligible.short_description = "Включить в бонусную программу (штучные)"
-
-    def make_not_bonus_eligible(self, request, qs):
-        updated = qs.update(is_bonus_eligible=False)
-        self.message_user(request, f"{updated} товаров исключено из бонусной программы.", messages.INFO)
-
-    make_not_bonus_eligible.short_description = "Исключить из бонусной программы"
-
-
-# ---------- Images ----------
-@admin.register(ProductImage)
-class ProductImageAdmin(admin.ModelAdmin):
-    list_display = ("product", "image_preview", "is_primary", "order", "created_at")
-    list_filter = ("is_primary",)
-    search_fields = ("product__name",)
-    ordering = ("product__name", "order")
-
-    @admin.display(description="Превью")
-    def image_preview(self, obj):
-        if obj.image:
-            return format_html('<img src="{}" width="50" height="50" style="object-fit:cover;border-radius:6px" />', obj.image.url)
+    @admin.display(description="Цена за 100г", ordering="price")
+    def price_per_100g_display(self, obj):
+        """Отображение цены за 100г для весовых товаров"""
+        if obj.category_type == Product.CategoryType.WEIGHT:
+            price_per_100g = obj.price * Decimal('0.1')  # цена за кг / 10
+            return f"{price_per_100g:.2f} сом"
         return "—"
 
-    actions = ["set_as_primary"]
+    def get_queryset(self, request):
+        """Оптимизируем запросы"""
+        qs = super().get_queryset(request)
+        return qs.select_related('category').prefetch_related('images')
 
-    def set_as_primary(self, request, qs):
-        """
-        Сделать выбранные изображения основными для их товара.
-        Для каждого товара оставляем основным только одно.
-        """
-        affected = 0
-        for img in qs.select_related("product"):
-            img.product.images.update(is_primary=False)
-            img.is_primary = True
-            img.save(update_fields=["is_primary"])
-            affected += 1
-        self.message_user(request, f"Обновлено: {affected} основн. изображений.", messages.SUCCESS)
+    def save_model(self, request, obj, form, change):
+        """Дополнительные проверки при сохранении"""
+        # Автоматически устанавливаем тип товара из категории если не задан
+        if obj.category and not obj.category_type:
+            obj.category_type = obj.category.category_type
 
-    set_as_primary.short_description = "Сделать основным"
+        # Весовые товары не могут участвовать в бонусах
+        if obj.category_type == Product.CategoryType.WEIGHT:
+            obj.is_bonus_eligible = False
+
+        super().save_model(request, obj, form, change)
+
+    actions = ['make_active', 'make_inactive', 'reset_stock', 'bulk_price_update']
+
+    @admin.action(description='Активировать выбранные товары')
+    def make_active(self, request, queryset):
+        updated = queryset.update(is_active=True, is_available=True)
+        self.message_user(request, f'{updated} товаров активированы.')
+
+    @admin.action(description='Деактивировать выбранные товары')
+    def make_inactive(self, request, queryset):
+        updated = queryset.update(is_active=False, is_available=False)
+        self.message_user(request, f'{updated} товаров деактивированы.')
+
+    @admin.action(description='Обнулить остатки')
+    def reset_stock(self, request, queryset):
+        updated = queryset.update(stock_quantity=0)
+        self.message_user(request, f'Остатки обнулены для {updated} товаров.')
+
+    @admin.action(description='Массовое изменение цен')
+    def bulk_price_update(self, request, queryset):
+        # Простая реализация - можно расширить
+        self.message_user(request, 'Функция массового изменения цен в разработке.')
+
+
+# ---------- Product Images ----------
+@admin.register(ProductImage)
+class ProductImageAdmin(admin.ModelAdmin):
+    list_display = ('product', 'image', 'is_primary', 'order', 'created_at')
+    list_filter = ('is_primary', 'created_at')
+    search_fields = ('product__name',)
+    ordering = ('product__name', 'order')
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('product')

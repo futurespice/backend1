@@ -1,3 +1,5 @@
+# ИСПРАВЛЕНИЕ: Удаляем несуществующий импорт ExpenseManagementService
+
 from datetime import date, timedelta
 from decimal import Decimal
 from django.db import transaction
@@ -7,10 +9,11 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 
 from .models import (
     Expense, ProductExpense, DailyExpenseLog,
-    ProductionBatch, MonthlyOverheadBudget
+    ProductionBatch, MonthlyOverheadBudget, BillOfMaterial, BOMLine
 )
 from .serializers import (
     ExpenseSerializer, ProductExpenseSerializer, DailyExpenseLogSerializer,
@@ -18,134 +21,141 @@ from .serializers import (
     CostCalculationRequestSerializer, CostBreakdownSerializer,
     BulkDailyExpenseSerializer, MonthlyOverheadBulkSerializer,
     DailyCostSummarySerializer, ExpensePriceUpdateSerializer,
-    SuzerainProductSetupSerializer
+    SuzerainProductSetupSerializer, BOMSerializer
 )
-from .services import CostCalculationService, ExpenseManagementService
+# ИСПРАВЛЕНО: Импортируем только существующий сервис
+from .services import CostCalculationService
 from users.permissions import IsAdminUser, IsPartnerUser
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
-    """
-    CRUD операции с расходами.
-    Админ: полный доступ
-    Партнер: только просмотр
-    """
+    """CRUD операции с расходами"""
     queryset = Expense.objects.all()
     serializer_class = ExpenseSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['type', 'status', 'state', 'is_universal', 'is_active']
-    search_fields = ['name']
-    ordering_fields = ['name', 'type', 'status', 'created_at']
-    ordering = ['name']
+    filterset_fields = ['type', 'status', 'is_active', 'is_universal']
+    search_fields = ['name', 'description']
+    ordering = ['type', 'name']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
-    @action(detail=False, methods=['get'])
-    def by_type(self, request):
-        """Группировка расходов по типам"""
-        physical = self.get_queryset().filter(type=Expense.ExpenseType.PHYSICAL)
-        overhead = self.get_queryset().filter(type=Expense.ExpenseType.OVERHEAD)
-
-        return Response({
-            'physical': ExpenseSerializer(physical, many=True).data,
-            'overhead': ExpenseSerializer(overhead, many=True).data
-        })
-
-    @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
-    def update_price(self, request):
-        """Обновление цены физического расхода"""
-        serializer = ExpensePriceUpdateSerializer(data=request.data)
+    @action(detail=False, methods=['post'])
+    def bulk_price_update(self, request):
+        """Массовое обновление цен расходов"""
+        serializer = ExpensePriceUpdateSerializer(data=request.data, many=True)
         serializer.is_valid(raise_exception=True)
 
-        expense_id = serializer.validated_data['expense_id']
-        new_price = serializer.validated_data['new_price']
-        effective_date = serializer.validated_data['effective_date']
-
-        expense = Expense.objects.get(id=expense_id)
-
-        # Обновляем базовую цену
-        expense.price_per_unit = new_price
-        expense.save()
-
-        # Создаем дневной лог с новой ценой
-        service = ExpenseManagementService()
-        service.update_daily_expense(
-            expense_id=expense_id,
-            calculation_date=effective_date,
-            actual_price_per_unit=new_price
-        )
+        updated_count = 0
+        for item in serializer.validated_data:
+            try:
+                expense = Expense.objects.get(id=item['expense_id'])
+                expense.price_per_unit = item['new_price']
+                expense.save()
+                updated_count += 1
+            except Expense.DoesNotExist:
+                continue
 
         return Response({
-            'message': f'Цена расхода "{expense.name}" обновлена на {new_price}',
-            'effective_date': effective_date
+            'message': f'Обновлено цен: {updated_count}',
+            'updated_count': updated_count
         })
 
 
 class ProductExpenseViewSet(viewsets.ModelViewSet):
-    """Управление связями товар-расход"""
+    """Связи продуктов с расходами"""
     queryset = ProductExpense.objects.select_related('product', 'expense')
     serializer_class = ProductExpenseSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['product', 'expense', 'expense__type', 'expense__status', 'is_active']
+    filterset_fields = ['product', 'expense', 'expense__type', 'is_active']
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
-    @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
-    def setup_suzerain(self, request):
-        """Настройка товара с расходом-Сюзереном"""
-        serializer = SuzerainProductSetupSerializer(data=request.data)
+
+class BOMViewSet(viewsets.ModelViewSet):
+    """Спецификации состава товаров (Bill of Materials)"""
+    queryset = BillOfMaterial.objects.select_related('product').prefetch_related('lines')
+    serializer_class = BOMSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['product', 'is_active']
+    search_fields = ['product__name']
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
+
+    @action(detail=True, methods=['post'])
+    def duplicate_bom(self, request, pk=None):
+        """Дублирование BOM спецификации"""
+        original_bom = self.get_object()
+
+        with transaction.atomic():
+            # Создаем новую BOM
+            new_bom = BillOfMaterial.objects.create(
+                product=original_bom.product,
+                version=f"{original_bom.version}_copy",
+                is_active=False  # Создаем неактивной
+            )
+
+            # Копируем все линии
+            for line in original_bom.lines.all():
+                BOMLine.objects.create(
+                    bom=new_bom,
+                    expense=line.expense,
+                    component_product=line.component_product,
+                    quantity=line.quantity,
+                    unit=line.unit,
+                    is_primary=line.is_primary,
+                    order=line.order
+                )
+
+        return Response({
+            'message': 'BOM скопирована успешно',
+            'new_bom_id': new_bom.id
+        })
+
+    @action(detail=False, methods=['post'])
+    def create_from_template(self, request):
+        """Создание BOM из шаблона"""
+        from .serializers import ProductRecipeTemplateSerializer
+
+        serializer = ProductRecipeTemplateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        product = serializer.validated_data['product']
-        expense = serializer.validated_data['expense']
-        ratio = serializer.validated_data['ratio_per_unit']
+        from .services import ProductRecipeManager
+        from products.models import Product
 
-        # Создаем/обновляем связь
-        link, created = ProductExpense.objects.update_or_create(
-            product=product,
-            expense=expense,
-            defaults={
-                'ratio_per_product_unit': ratio,
-                'is_active': True
-            }
-        )
+        product = Product.objects.get(id=serializer.validated_data['product_id'])
+        template_data = {
+            'components': serializer.validated_data['components']
+        }
 
-        return Response({
-            'message': f'Сюзерен "{expense.name}" настроен для товара "{product.name}"',
-            'ratio_per_unit': float(ratio),
-            'created': created
-        })
+        recipe_manager = ProductRecipeManager()
 
-    @action(detail=False, methods=['get'])
-    def by_product(self, request):
-        """Расходы по конкретному товару"""
-        product_id = request.query_params.get('product_id')
-        if not product_id:
-            return Response({'error': 'Нужен параметр product_id'}, status=400)
-
-        expenses = self.get_queryset().filter(product_id=product_id, is_active=True)
-
-        # Группируем по типам
-        physical = expenses.filter(expense__type=Expense.ExpenseType.PHYSICAL)
-        overhead = expenses.filter(expense__type=Expense.ExpenseType.OVERHEAD)
-
-        return Response({
-            'product_id': int(product_id),
-            'physical_expenses': ProductExpenseSerializer(physical, many=True).data,
-            'overhead_expenses': ProductExpenseSerializer(overhead, many=True).data
-        })
+        try:
+            bom = recipe_manager.create_recipe_from_template(product, template_data)
+            return Response({
+                'message': f'BOM создана для продукта {product.name}',
+                'bom_id': bom.id,
+                'components_count': len(template_data['components'])
+            })
+        except Exception as e:
+            return Response({
+                'error': f'Ошибка создания BOM: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class DailyExpenseLogViewSet(viewsets.ModelViewSet):
-    """Управление дневными расходами"""
+    """Дневные логи расходов"""
     queryset = DailyExpenseLog.objects.select_related('expense')
     serializer_class = DailyExpenseLogSerializer
     permission_classes = [IsAuthenticated]
@@ -154,36 +164,44 @@ class DailyExpenseLogViewSet(viewsets.ModelViewSet):
     ordering = ['-date', 'expense__name']
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'bulk_update']:
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAdminUser()]
         return [IsAuthenticated()]
 
-    @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
-    def bulk_update(self, request):
-        """Массовое обновление дневных расходов"""
+    @action(detail=False, methods=['post'])
+    def bulk_create(self, request):
+        """Массовое создание дневных логов"""
         serializer = BulkDailyExpenseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        calc_date = serializer.validated_data['date']
+        log_date = serializer.validated_data['date']
         expenses_data = serializer.validated_data['expenses']
 
-        service = ExpenseManagementService()
         created_logs = []
+        for expense_data in expenses_data:
+            expense = Expense.objects.get(id=expense_data['expense_id'])
 
-        with transaction.atomic():
-            for expense_data in expenses_data:
-                expense_id = expense_data.pop('expense_id')
+            # Рассчитываем total_cost
+            quantity = Decimal(str(expense_data['quantity_used']))
+            price = Decimal(str(expense_data.get('actual_price', expense.price_per_unit)))
+            total_cost = quantity * price
 
-                log = service.update_daily_expense(
-                    expense_id=expense_id,
-                    calculation_date=calc_date,
-                    **expense_data
-                )
+            log, created = DailyExpenseLog.objects.update_or_create(
+                expense=expense,
+                date=log_date,
+                defaults={
+                    'quantity_used': quantity,
+                    'actual_price_per_unit': price,
+                    'total_cost': total_cost
+                }
+            )
+
+            if created:
                 created_logs.append(log)
 
         return Response({
-            'message': f'Обновлено {len(created_logs)} расходов на {calc_date}',
-            'date': calc_date,
+            'message': f'Создано {len(created_logs)} записей расходов за {log_date}',
+            'date': log_date,
             'updated_count': len(created_logs)
         })
 
@@ -234,7 +252,7 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
         """
         Расчет себестоимости по производственным данным.
 
-        Пример запроса из реального кейса заказчика:
+        Пример запроса:
         {
             "date": "2025-09-03",
             "production_data": {
@@ -250,7 +268,7 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
         calc_date = serializer.validated_data['date']
         production_data = serializer.validated_data['production_data']
 
-        # Конвертируем ключи в int для сервиса
+        # Конвертируем ключи в int
         production_data_int = {
             int(k): v for k, v in production_data.items()
         }
@@ -291,6 +309,16 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
                         }
                         for item in breakdown.physical_costs
                     ],
+                    'component_costs': [  # ДОБАВЛЕНО: Компоненты-продукты
+                        {
+                            'name': item.name,
+                            'unit': item.unit,
+                            'consumed_quantity': float(item.consumed_quantity),
+                            'unit_price': float(item.unit_price),
+                            'total_cost': float(item.total_cost)
+                        }
+                        for item in breakdown.component_costs
+                    ],
                     'overhead_costs': [
                         {
                             'name': item.name,
@@ -302,6 +330,7 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
                     ],
                     'totals': {
                         'physical': float(breakdown.total_physical),
+                        'components': float(breakdown.total_components),  # ДОБАВЛЕНО
                         'overhead': float(breakdown.total_overhead),
                         'total': float(breakdown.total_cost),
                         'cost_per_unit': float(breakdown.cost_per_unit)
@@ -315,180 +344,66 @@ class ProductionBatchViewSet(viewsets.ModelViewSet):
             })
 
         except Exception as e:
-            return Response(
-                {'error': f'Ошибка расчета: {str(e)}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
-    def update_revenue(self, request, pk=None):
-        """Обновление выручки и прибыли смены С УЧЕТОМ БОНУСОВ"""
-        batch = self.get_object()
-        revenue = request.data.get('revenue')
-        sold_quantity = request.data.get('sold_quantity')  # НОВЫЙ параметр для бонусов
-
-        if revenue is None:
-            return Response({'error': 'Нужен параметр revenue'}, status=400)
-
-        try:
-            revenue = Decimal(str(revenue))
-
-            # Если указано sold_quantity, применяем бонусную систему
-            if sold_quantity is not None:
-                from .bonus_service import BonusIntegrationService
-
-                sold_qty = int(sold_quantity)
-
-                # Интегрируем бонусы
-                updated_batch = BonusIntegrationService.integrate_bonus_with_cost_calculation(
-                    batch.id, {batch.product.id: sold_qty}
-                )
-
-                if updated_batch:
-                    bonus_info = updated_batch.cost_breakdown.get('bonus_info', {})
-                    return Response({
-                        'message': 'Выручка обновлена с учетом бонусов',
-                        'revenue': float(updated_batch.revenue),
-                        'net_profit': float(updated_batch.net_profit),
-                        'profit_margin': float(
-                            updated_batch.net_profit / updated_batch.revenue * 100) if updated_batch.revenue > 0 else 0,
-                        'bonus_info': {
-                            'sold_quantity': bonus_info.get('sold_quantity', 0),
-                            'payable_quantity': bonus_info.get('payable_quantity', 0),
-                            'bonus_quantity': bonus_info.get('bonus_quantity', 0),
-                            'bonus_discount': bonus_info.get('bonus_discount', 0),
-                            'net_revenue': bonus_info.get('net_revenue', 0)
-                        }
-                    })
-            else:
-                # Стандартное обновление без бонусов
-                service = CostCalculationService()
-                updated_batch = service.update_batch_revenue(batch.id, revenue)
-
-                return Response({
-                    'message': 'Выручка обновлена',
-                    'revenue': float(updated_batch.revenue),
-                    'net_profit': float(updated_batch.net_profit),
-                    'profit_margin': float(
-                        updated_batch.net_profit / updated_batch.revenue * 100) if updated_batch.revenue > 0 else 0
-                })
-
-        except (ValueError, TypeError):
-            return Response({'error': 'Некорректные значения'}, status=400)
-
-    @action(detail=False, methods=['post'], permission_classes=[IsAdminUser])
-    def apply_mass_bonuses(self, request):
-        """
-        Массовое применение бонусов ко всем продажам за день.
-
-        Пример запроса:
-        {
-            "date": "2025-09-03",
-            "sales_data": {
-                "1": 1100,  // product_id: sold_quantity
-                "2": 440,
-                "3": 280
-            }
-        }
-        """
-        calc_date_str = request.data.get('date')
-        sales_data = request.data.get('sales_data', {})
-
-        if not calc_date_str or not sales_data:
             return Response({
-                'error': 'Нужны параметры date и sales_data'
-            }, status=400)
-
-        try:
-            calc_date = date.fromisoformat(calc_date_str)
-            # Конвертируем ключи в int
-            sales_by_product = {int(k): int(v) for k, v in sales_data.items()}
-        except (ValueError, TypeError):
-            return Response({
-                'error': 'Некорректный формат данных'
-            }, status=400)
-
-        from .bonus_service import BonusIntegrationService
-
-        result = BonusIntegrationService.apply_mass_bonus_calculation(
-            calc_date, sales_by_product
-        )
-
-        return Response(result)
-
-    @action(detail=False, methods=['get'])
-    def daily_summary(self, request):
-        """Сводка по всем товарам за день"""
-        target_date = request.query_params.get('date')
-        if not target_date:
-            target_date = date.today().isoformat()
-
-        try:
-            calc_date = date.fromisoformat(target_date)
-        except ValueError:
-            return Response({'error': 'Некорректный формат даты'}, status=400)
-
-        service = CostCalculationService()
-        summary = service.get_cost_summary_for_date(calc_date)
-
-        return Response(summary)
+                'error': f'Ошибка расчета: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
 class MonthlyOverheadBudgetViewSet(viewsets.ModelViewSet):
     """Месячные бюджеты накладных расходов"""
     queryset = MonthlyOverheadBudget.objects.select_related('expense')
     serializer_class = MonthlyOverheadBudgetSerializer
-    permission_classes = [IsAdminUser]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
     filterset_fields = ['year', 'month', 'expense']
-    ordering = ['-year', '-month', 'expense__name']
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
 
     @action(detail=False, methods=['post'])
     def bulk_create(self, request):
-        """
-        Массовое создание месячного бюджета.
-
-        Пример из реального кейса:
-        {
-            "year": 2025,
-            "month": 9,
-            "overheads": {
-                "1": 35000,  # аренда
-                "2": 25000,  # свет
-                "3": 45000,  # налоги
-                "4": 12000,  # уборщица
-                "5": 5000    # админ
-            }
-        }
-        """
+        """Массовое создание месячных бюджетов"""
         serializer = MonthlyOverheadBulkSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         year = serializer.validated_data['year']
         month = serializer.validated_data['month']
-        overheads_data = serializer.validated_data['overheads']
+        budgets_data = serializer.validated_data['budgets']
 
-        # Конвертируем ключи в int
-        overheads_int = {int(k): v for k, v in overheads_data.items()}
+        created_budgets = []
+        for budget_data in budgets_data:
+            expense = Expense.objects.get(id=budget_data['expense_id'])
 
-        service = ExpenseManagementService()
-        service.bulk_update_monthly_overheads(year, month, overheads_int)
+            budget, created = MonthlyOverheadBudget.objects.update_or_create(
+                expense=expense,
+                year=year,
+                month=month,
+                defaults={
+                    'planned_amount': Decimal(str(budget_data['planned_amount']))
+                }
+            )
 
-        # Возвращаем созданные/обновленные бюджеты
-        budgets = self.get_queryset().filter(year=year, month=month)
+            if created:
+                created_budgets.append(budget)
 
         return Response({
-            'message': f'Бюджеты на {month}/{year} обновлены',
-            'count': budgets.count(),
-            'total_planned': float(sum(b.planned_amount for b in budgets)),
-            'budgets': MonthlyOverheadBudgetSerializer(budgets, many=True).data
+            'message': f'Создано бюджетов: {len(created_budgets)} за {month}/{year}',
+            'year': year,
+            'month': month,
+            'created_count': len(created_budgets)
         })
 
     @action(detail=False, methods=['get'])
     def current_month(self, request):
-        """Бюджеты текущего месяца"""
+        """Бюджет текущего месяца"""
         today = date.today()
-        budgets = self.get_queryset().filter(year=today.year, month=today.month)
+
+        budgets = self.get_queryset().filter(
+            year=today.year,
+            month=today.month
+        )
 
         total_planned = budgets.aggregate(total=Sum('planned_amount'))['total'] or 0
         total_actual = budgets.aggregate(total=Sum('actual_amount'))['total'] or 0
@@ -505,8 +420,6 @@ class MonthlyOverheadBudgetViewSet(viewsets.ModelViewSet):
             }
         })
 
-
-# ---------- Дополнительные ViewSets для аналитики ----------
 
 class CostAnalyticsViewSet(viewsets.ViewSet):
     """Аналитика по себестоимости"""
@@ -541,93 +454,200 @@ class CostAnalyticsViewSet(viewsets.ViewSet):
             for batch in batches
         ]
 
-        # Средние показатели
-        if batches:
-            avg_stats = batches.aggregate(
-                avg_cost_per_unit=Avg('cost_per_unit'),
-                avg_physical=Avg('physical_cost'),
-                avg_overhead=Avg('overhead_cost')
-            )
-        else:
-            avg_stats = {}
-
         return Response({
             'product_id': int(product_id),
             'period': {'start': start_date, 'end': end_date},
-            'trend_data': trend_data,
-            'averages': avg_stats
+            'trend_data': trend_data
         })
 
     @action(detail=False, methods=['get'])
-    def expense_impact_analysis(self, request):
-        """Анализ влияния расходов на себестоимость"""
+    def daily_summary(self, request):
+        """Дневная сводка расходов и производства"""
         target_date = request.query_params.get('date', date.today().isoformat())
 
         try:
-            calc_date = date.fromisoformat(target_date)
+            summary_date = date.fromisoformat(target_date)
         except ValueError:
-            return Response({'error': 'Некорректный формат даты'}, status=400)
+            return Response({'error': 'Неверный формат даты'}, status=400)
 
-        # Получаем все смены за день
-        batches = ProductionBatch.objects.filter(date=calc_date).select_related('product')
+        # Расходы за день
+        daily_logs = DailyExpenseLog.objects.filter(date=summary_date)
+        physical_expenses = daily_logs.filter(expense__type=Expense.ExpenseType.PHYSICAL).aggregate(
+            total=Sum('total_cost')
+        )['total'] or 0
+        overhead_expenses = daily_logs.filter(expense__type=Expense.ExpenseType.OVERHEAD).aggregate(
+            total=Sum('total_cost')
+        )['total'] or 0
 
-        if not batches:
-            return Response({
-                'message': f'Нет данных производства за {calc_date}',
-                'date': calc_date
-            })
-
-        # Анализируем влияние каждого расхода
-        expense_impact = {}
-
-        for batch in batches:
-            breakdown = batch.cost_breakdown
-
-            # Физические расходы
-            for item in breakdown.get('physical_costs', []):
-                expense_id = item['expense_id']
-                if expense_id not in expense_impact:
-                    expense_impact[expense_id] = {
-                        'name': item['name'],
-                        'type': 'physical',
-                        'total_cost': 0,
-                        'affected_products': []
-                    }
-
-                expense_impact[expense_id]['total_cost'] += item['total_cost']
-                expense_impact[expense_id]['affected_products'].append({
-                    'product_id': batch.product.id,
-                    'product_name': batch.product.name,
-                    'cost_contribution': item['total_cost']
-                })
-
-            # Накладные расходы
-            for item in breakdown.get('overhead_costs', []):
-                expense_id = item['expense_id']
-                if expense_id not in expense_impact:
-                    expense_impact[expense_id] = {
-                        'name': item['name'],
-                        'type': 'overhead',
-                        'total_cost': 0,
-                        'affected_products': []
-                    }
-
-                expense_impact[expense_id]['total_cost'] += item['allocated_cost']
-                expense_impact[expense_id]['affected_products'].append({
-                    'product_id': batch.product.id,
-                    'product_name': batch.product.name,
-                    'cost_contribution': item['allocated_cost']
-                })
-
-        # Сортируем по влиянию (общей стоимости)
-        sorted_impact = sorted(
-            expense_impact.values(),
-            key=lambda x: x['total_cost'],
-            reverse=True
-        )
+        # Производство за день
+        production_batches = ProductionBatch.objects.filter(date=summary_date)
+        total_produced = production_batches.aggregate(total=Sum('produced_quantity'))['total'] or 0
+        total_costs = production_batches.aggregate(total=Sum('total_cost'))['total'] or 0
+        total_revenue = production_batches.aggregate(total=Sum('revenue'))['total'] or 0
 
         return Response({
-            'date': calc_date,
-            'total_expenses': len(expense_impact),
-            'expense_impact_ranking': sorted_impact
+            'date': summary_date,
+            'expenses': {
+                'physical': float(physical_expenses),
+                'overhead': float(overhead_expenses),
+                'total': float(physical_expenses + overhead_expenses)
+            },
+            'production': {
+                'total_quantity': float(total_produced),
+                'total_costs': float(total_costs),
+                'total_revenue': float(total_revenue),
+                'profit': float(total_revenue - total_costs),
+                'products_count': production_batches.count()
+            }
+        })
+
+
+# ---------- Специальные API Views ----------
+
+class QuickSetupView(APIView):
+    """Быстрая настройка системы расходов"""
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        """
+        Создает базовые расходы для старта системы
+
+        Пример из ТЗ:
+        - Аренда: 35000 (накладной)
+        - Фарш: 270 сом/кг (физический, Сюзерен)
+        - Мука: 630 сом/мешок (физический)
+        """
+
+        basic_expenses = [
+            # Накладные расходы (месячные)
+            {'name': 'Аренда', 'type': 'overhead', 'price': 35000, 'unit': 'мес'},
+            {'name': 'Электричество', 'type': 'overhead', 'price': 25000, 'unit': 'мес'},
+            {'name': 'Налоги', 'type': 'overhead', 'price': 45000, 'unit': 'мес'},
+            {'name': 'Зарплата уборщицы', 'type': 'overhead', 'price': 12000, 'unit': 'мес'},
+            {'name': 'Админ расходы', 'type': 'overhead', 'price': 5000, 'unit': 'мес'},
+            {'name': 'Холодильник', 'type': 'overhead', 'price': 5000, 'unit': 'мес'},
+            {'name': 'Упаковка общая', 'type': 'overhead', 'price': 36000, 'unit': 'мес'},
+
+            # Физические расходы
+            {'name': 'Фарш говяжий', 'type': 'physical', 'price': 270, 'unit': 'кг', 'status': 'suzerain'},
+            {'name': 'Мука высший сорт', 'type': 'physical', 'price': 630, 'unit': 'кг'},
+            {'name': 'Соль пищевая', 'type': 'physical', 'price': 30, 'unit': 'кг'},
+            {'name': 'Яйца куриные', 'type': 'physical', 'price': 400, 'unit': 'шт'},
+            {'name': 'Лук репчатый', 'type': 'physical', 'price': 50, 'unit': 'кг'},
+            {'name': 'Пакеты упаковочные', 'type': 'physical', 'price': 4.5, 'unit': 'шт'},
+            {'name': 'Приправы', 'type': 'physical', 'price': 5, 'unit': 'кг'},
+            {'name': 'Солярка', 'type': 'physical', 'price': 50, 'unit': 'л'},
+        ]
+
+        created_expenses = []
+
+        for expense_data in basic_expenses:
+            expense, created = Expense.objects.get_or_create(
+                name=expense_data['name'],
+                defaults={
+                    'type': expense_data['type'],
+                    'status': expense_data.get('status', 'regular'),
+                    'price_per_unit': expense_data['price'],
+                    'unit': expense_data['unit'],
+                    'is_active': True,
+                    'is_universal': True
+                }
+            )
+
+            if created:
+                created_expenses.append(expense.name)
+
+        return Response({
+            'message': 'Базовые расходы созданы',
+            'created_expenses': created_expenses,
+            'total_created': len(created_expenses)
+        })
+
+
+class BatchCostCalculationView(APIView):
+    """Упрощенный расчет себестоимости для одного продукта"""
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        """
+        Расчет себестоимости для одного продукта
+
+        {
+            "product_id": 1,
+            "quantity": 1100,
+            "date": "2025-09-03"
+        }
+        """
+        product_id = request.data.get('product_id')
+        quantity = request.data.get('quantity')
+        calc_date = request.data.get('date', date.today().isoformat())
+
+        if not product_id or not quantity:
+            return Response({
+                'error': 'Требуются product_id и quantity'
+            }, status=400)
+
+        try:
+            calc_date = date.fromisoformat(str(calc_date))
+        except ValueError:
+            return Response({'error': 'Неверный формат даты'}, status=400)
+
+        service = CostCalculationService()
+
+        # Формируем данные в нужном формате
+        production_data = {
+            int(product_id): {'quantity': float(quantity)}
+        }
+
+        try:
+            breakdowns = service.calculate_daily_costs(
+                production_data=production_data,
+                calculation_date=calc_date
+            )
+
+            if not breakdowns:
+                return Response({
+                    'error': 'Не удалось рассчитать себестоимость'
+                }, status=400)
+
+            breakdown = breakdowns[0]
+
+            return Response({
+                'product_id': breakdown.product_id,
+                'quantity': float(breakdown.produced_quantity),
+                'date': breakdown.date,
+                'cost_per_unit': float(breakdown.cost_per_unit),
+                'total_cost': float(breakdown.total_cost),
+                'breakdown': {
+                    'physical': float(breakdown.total_physical),
+                    'components': float(breakdown.total_components),
+                    'overhead': float(breakdown.total_overhead)
+                }
+            })
+
+        except Exception as e:
+            return Response({
+                'error': f'Ошибка расчета: {str(e)}'
+            }, status=400)
+
+
+class BonusCalculationView(APIView):
+    """Расчет бонусов (заготовка)"""
+    permission_classes = [IsPartnerUser]
+    serializer_class = CostBreakdownSerializer  # Для документации
+
+    def post(self, request):
+        return Response({
+            'message': 'Система бонусов в разработке'
+        })
+
+
+class BonusAnalysisView(APIView):
+    """Анализ бонусов (заготовка)"""
+    permission_classes = [IsPartnerUser]
+    serializer_class = CostBreakdownSerializer  # Для документации
+
+    def get(self, request):
+        return Response({
+            'message': 'Анализ бонусов в разработке'
         })

@@ -63,7 +63,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         if self.action in ["create", "update", "partial_update", "destroy", "update_stock"]:
             return [IsAdminUser()]
         elif self.action in ["request_products"]:
-            return [IsPartnerUser() | IsStoreUser()]
+            return [IsPartnerUser(), IsStoreUser()]
         return [permissions.IsAuthenticated()]
 
     @action(detail=True, methods=["patch"], permission_classes=[IsAdminUser])
