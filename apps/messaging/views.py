@@ -15,12 +15,10 @@ from .permissions import (
     CanEditOrDeleteMessage,
     _ALLOWED_ROLES_BY_KIND
 )
+from django.db.models import Exists, OuterRef, Q
+from regions.models import City, Region
 
 class ChatViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Список/детали чатов текущего пользователя.
-    Фильтры из ТЗ: ?kind=admin_partner|partner_store|admin_store, ?city=, ?region=
-    """
     serializer_class = ChatSerializer
     permission_classes = [IsChatParticipantOrGlobalAdmin, KindRoleGuard]
 
@@ -29,21 +27,56 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             Chat.objects.filter(members__user=user)
             .distinct()
-            .select_related()
-            .prefetch_related("messages")
+            .prefetch_related("messages", "members__user")
             .order_by("-updated_at")
         )
+
         kind = self.request.query_params.get("kind")
         if kind:
             qs = qs.filter(kind=kind)
 
-        city = self.request.query_params.get("city")
-        if city:
-            qs = qs.filter(metadata__city__iexact=city)
+        # --- Гео ---
+        city_param   = (self.request.query_params.get("city") or "").strip()
+        city_id      = self.request.query_params.get("city_id")
+        region_param = (self.request.query_params.get("region") or "").strip()
+        region_id    = self.request.query_params.get("region_id")
 
-        region = self.request.query_params.get("region")
-        if region:
-            qs = qs.filter(metadata__region__iexact=region)
+        geo_requested = bool(city_param or city_id or region_param or region_id)
+        kind_allows_geo = (kind in ("partner_store", "admin_store") or kind is None)
+
+        if geo_requested and kind_allows_geo:
+            geo_filter = Q(chat=OuterRef("pk"), role_in_chat="store")
+
+            # Город
+            if city_id:
+                geo_filter &= Q(user__store__city_id=city_id)
+            elif city_param:
+                # Unicode-корректное сопоставление в Python (обходит проблему SQLite)
+                cp = city_param.casefold()
+                city_ids = [
+                    c.id for c in City.objects.only("id", "name")
+                    if (c.name or "").casefold() == cp
+                ]
+                # если вдруг не нашли точное, можно расширить до startswith/contains по casefold()
+                if city_ids:
+                    geo_filter &= Q(user__store__city_id__in=city_ids)
+                else:
+                    # чтобы явно вернуть пустой набор, если не найдено
+                    geo_filter &= Q(user__store__city_id__in=[])
+
+            # Регион
+            if region_id:
+                geo_filter &= Q(user__store__region_id=region_id)
+            elif region_param:
+                rp = region_param.casefold()
+                region_ids = [
+                    r.id for r in Region.objects.only("id", "name")
+                    if (r.name or "").casefold() == rp
+                ]
+                geo_filter &= Q(user__store__region_id__in=region_ids or [])
+
+            subq = ChatMember.objects.filter(geo_filter)
+            qs = qs.annotate(_has_geo=Exists(subq)).filter(_has_geo=True)
 
         return qs
 
