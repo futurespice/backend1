@@ -1,15 +1,10 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from . import views
+from .views import CategoryViewSet, ProductViewSet
 
 router = DefaultRouter()
-
-# Основные ViewSets
-router.register(r'categories', views.ProductCategoryViewSet)
-router.register(r'images', views.ProductImageViewSet)
-router.register(r'products', views.ProductViewSet)  # Явно указываем префикс
-
-app_name = 'products'
+router.register(r'categories', CategoryViewSet, basename='categories')
+router.register(r'products', ProductViewSet, basename='products')
 
 urlpatterns = [
     path('', include(router.urls)),

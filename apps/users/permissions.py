@@ -23,7 +23,8 @@ class IsPartnerUser(permissions.BasePermission):
         return (
                 request.user and
                 request.user.is_authenticated and
-                request.user.role == 'partner'
+                request.user.role == 'partner' and
+                request.user.is_approved
         )
 
 
@@ -36,7 +37,22 @@ class IsStoreUser(permissions.BasePermission):
         return (
                 request.user and
                 request.user.is_authenticated and
-                request.user.role == 'store'
+                request.user.role == 'store' and
+                request.user.is_approved
+        )
+
+
+class IsPartnerOrStoreUser(permissions.BasePermission):
+    """
+    Разрешение для партнёров или магазинов
+    """
+
+    def has_permission(self, request, view):
+        return (
+                request.user and
+                request.user.is_authenticated and
+                request.user.role in ['partner', 'store'] and
+                request.user.is_approved
         )
 
 
@@ -46,12 +62,27 @@ class IsOwnerOrAdmin(permissions.BasePermission):
     """
 
     def has_object_permission(self, request, view, obj):
-        # Администраторы могут всё
         if request.user.role == 'admin':
             return True
 
-        # Владелец может редактировать свой объект
+        # Проверяем есть ли у объекта поле user или owner
         if hasattr(obj, 'user'):
             return obj.user == request.user
+        elif hasattr(obj, 'owner'):
+            return obj.owner == request.user
 
-        return obj == request.user
+        return False
+
+
+class IsApprovedUser(permissions.BasePermission):
+    """
+    Разрешение только для одобренных пользователей
+    """
+
+    def has_permission(self, request, view):
+        return (
+                request.user and
+                request.user.is_authenticated and
+                request.user.is_approved and
+                request.user.is_active
+        )

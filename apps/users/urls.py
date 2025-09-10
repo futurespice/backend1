@@ -1,29 +1,35 @@
 from django.urls import path, include
-from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework.routers import DefaultRouter
-from . import views
+from rest_framework_simplejwt.views import TokenRefreshView
+from .views import (
+    UserRegistrationView,
+    CustomTokenObtainPairView,
+    UserProfileView,
+    UserListViewSet,
+    PasswordResetRequestView,
+    PasswordResetCodeView,
+    PasswordResetConfirmView,
+    logout_view
+)
 
-# Создаем роутер для ViewSets
 router = DefaultRouter()
-router.register(r'admin/users', views.AdminUserViewSet, basename='admin-users')
+router.register(r'admin/users', UserListViewSet, basename='admin-users')
 
 urlpatterns = [
-    # Регистрация
-    path('register/', views.UserRegistrationView.as_view(), name='register'),
-
-    # Аутентификация (JWT)
-    path('token/', views.CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    # Аутентификация
+    path('register/', UserRegistrationView.as_view(), name='register'),
+    path('login/', CustomTokenObtainPairView.as_view(), name='login'),
+    path('logout/', logout_view, name='logout'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('logout/', views.logout_view, name='logout'),
 
     # Профиль
-    path('me/', views.UserProfileView.as_view(), name='user_profile'),
+    path('profile/', UserProfileView.as_view(), name='profile'),
 
     # Сброс пароля
-    path('password-reset/', views.PasswordResetRequestView.as_view(), name='password_reset'),
-    path('password-reset/check-code/', views.PasswordResetCodeCheckView.as_view(), name='password_reset_check_code'),
-    path('password-reset-confirm/', views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
+    path('password/reset/', PasswordResetRequestView.as_view(), name='password_reset'),
+    path('password/reset/code/', PasswordResetCodeView.as_view(), name='password_reset_code'),
+    path('password/reset/confirm/', PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
 
-    # Подключаем роутер (админские API)
+    # Роуты для админов
     path('', include(router.urls)),
 ]

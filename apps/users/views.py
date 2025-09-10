@@ -2,18 +2,20 @@ from rest_framework import status, generics, permissions, viewsets, filters
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from .models import User
 from .serializers import (
     UserRegistrationSerializer,
+    CustomTokenObtainSerializer,
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
+    PasswordResetCodeSerializer,
     UserProfileSerializer,
     UserListSerializer,
-    UserModerationSerializer, PasswordResetCodeSerializer
+    UserModerationSerializer
 )
 from .permissions import IsAdminUser
 
@@ -32,60 +34,67 @@ class UserRegistrationView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
 
-        return Response({
+        # Формируем ответ
+        response_data = {
             'message': 'Регистрация успешна',
             'user': {
                 'id': user.id,
                 'email': user.email,
                 'name': user.name,
                 'second_name': user.second_name,
+                'phone': user.phone,
                 'role': user.role,
                 'is_approved': user.is_approved
-            },
-            'requires_approval': user.role == 'partner'
-        }, status=status.HTTP_201_CREATED)
+            }
+        }
+
+        # Для партнёров добавляем информацию о необходимости одобрения
+        if user.role == 'partner':
+            response_data['requires_approval'] = True
+            response_data['message'] = 'Регистрация успешна. Заявка передана на рассмотрение администратору.'
+        else:
+            response_data['requires_approval'] = False
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
-class CustomTokenObtainPairView(TokenObtainPairView):
+class CustomTokenObtainPairView(generics.GenericAPIView):
     """
     Кастомный вход в систему
-    Использует стандартный JWT, но возвращает дополнительную информацию о пользователе
+    Вход только по номеру телефона и паролю
     """
+    serializer_class = CustomTokenObtainSerializer
+    permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        if response.status_code == 200:
-            # Получаем пользователя
-            email = request.data.get('email')
-            try:
-                user = User.objects.get(email=email)
+        user = serializer.validated_data['user']
 
-                # Проверяем одобрение
-                if not user.is_approved:
-                    return Response({
-                        'error': 'Аккаунт ожидает одобрения администратора'
-                    }, status=status.HTTP_403_FORBIDDEN)
+        # Генерируем JWT токены
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
 
-                # Добавляем информацию о пользователе в ответ
-                response.data['user'] = {
-                    'id': user.id,
-                    'email': user.email,
-                    'name': user.name,
-                    'second_name': user.second_name,
-                    'role': user.role,
-                    'avatar': user.avatar.url if user.avatar else None
-                }
-
-            except User.DoesNotExist:
-                pass
-
-        return response
+        return Response({
+            'access': str(access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name,
+                'second_name': user.second_name,
+                'phone': user.phone,
+                'role': user.role,
+                'is_approved': user.is_approved,
+                'full_name': user.get_full_name()
+            }
+        }, status=status.HTTP_200_OK)
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
     """
-    Получение и обновление профиля текущего пользователя
+    Просмотр и редактирование профиля пользователя
     """
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated]
@@ -94,153 +103,143 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
-class AdminUserViewSet(viewsets.ModelViewSet):
+class UserListViewSet(viewsets.ModelViewSet):
     """
-    API для администраторов по управлению пользователями
+    ViewSet для управления пользователями (только для админов)
     """
-    queryset = User.objects.all()
+    queryset = User.objects.all().order_by('-created_at')
     permission_classes = [IsAdminUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['role', 'is_approved', 'is_active']
-    search_fields = ['email','name','second_name', 'phone']
-    ordering_fields = ['created_at', 'email', 'full_name']
+    search_fields = ['email', 'name', 'second_name', 'phone']
+    ordering_fields = ['created_at', 'name', 'email']
     ordering = ['-created_at']
 
     def get_serializer_class(self):
-        if self.action in ['approve', 'reject', 'block', 'unblock']:
+        if self.action in ['update', 'partial_update']:
             return UserModerationSerializer
         return UserListSerializer
 
-    @action(detail=False, methods=['get'])
-    def pending(self, request):
-        """Список пользователей ожидающих одобрения"""
-        pending_users = self.queryset.filter(is_approved=False, is_active=True)
-        serializer = self.get_serializer(pending_users, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def approved(self, request):
-        """Список одобренных пользователей"""
-        approved_users = self.queryset.filter(is_approved=True, is_active=True)
-        serializer = self.get_serializer(approved_users, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def blocked(self, request):
-        """Список заблокированных пользователей"""
-        blocked_users = self.queryset.filter(is_active=False)
-        serializer = self.get_serializer(blocked_users, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def partners(self, request):
-        """Список партнёров"""
-        partners = self.queryset.filter(role='partner')
-        serializer = self.get_serializer(partners, many=True)
-        return Response(serializer.data)
-
-    @action(detail=False, methods=['get'])
-    def stores(self, request):
-        """Список магазинов"""
-        stores = self.queryset.filter(role='store')
-        serializer = self.get_serializer(stores, many=True)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
     def approve(self, request, pk=None):
         """Одобрить пользователя"""
         user = self.get_object()
-        serializer = UserModerationSerializer(user, data={'is_approved': True}, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': f'Пользователь {user.email} одобрен'})
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user.is_approved = True
+        user.save()
 
-    @action(detail=True, methods=['post'])
+        return Response({
+            'message': f'Пользователь {user.get_full_name()} одобрен',
+            'user': UserListSerializer(user).data
+        })
+
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
     def reject(self, request, pk=None):
         """Отклонить пользователя"""
         user = self.get_object()
-        serializer = UserModerationSerializer(user, data={'is_approved': False}, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': f'Пользователь {user.email} отклонён'})
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user.is_approved = False
+        user.save()
 
-    @action(detail=True, methods=['post'])
+        return Response({
+            'message': f'Пользователь {user.get_full_name()} отклонён',
+            'user': UserListSerializer(user).data
+        })
+
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
     def block(self, request, pk=None):
         """Заблокировать пользователя"""
         user = self.get_object()
-        serializer = UserModerationSerializer(user, data={'is_active': False}, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': f'Пользователь {user.email} заблокирован'})
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user.is_active = False
+        user.save()
 
-    @action(detail=True, methods=['post'])
+        return Response({
+            'message': f'Пользователь {user.get_full_name()} заблокирован',
+            'user': UserListSerializer(user).data
+        })
+
+    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
     def unblock(self, request, pk=None):
         """Разблокировать пользователя"""
         user = self.get_object()
-        serializer = UserModerationSerializer(user, data={'is_active': True}, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': f'Пользователь {user.email} разблокирован'})
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user.is_active = True
+        user.save()
+
+        return Response({
+            'message': f'Пользователь {user.get_full_name()} разблокирован',
+            'user': UserListSerializer(user).data
+        })
 
 
 class PasswordResetRequestView(generics.CreateAPIView):
-    """Запрос на сброс пароля"""
+    """
+    Запрос на сброс пароля
+    Отправляет код на email
+    """
     serializer_class = PasswordResetRequestSerializer
     permission_classes = [AllowAny]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        reset_request = serializer.save()
+        serializer.save()
 
         return Response({
-            'message': 'Код для сброса пароля отправлен на email',
-            # В разработке показываем код, в продакшене убрать!
-            'code': reset_request.code if settings.DEBUG else None
+            'message': 'Код для сброса пароля отправлен на email'
         }, status=status.HTTP_200_OK)
 
 
-class PasswordResetCodeCheckView(generics.GenericAPIView):
-    """Проверка валидности кода сброса"""
+class PasswordResetCodeView(generics.CreateAPIView):
+    """
+    Проверка кода сброса пароля
+    """
     serializer_class = PasswordResetCodeSerializer
     permission_classes = [AllowAny]
-    def post(self, request, *args, **kwargs):
+
+    def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        return Response({'message': 'Код подтверждён'}, status=status.HTTP_200_OK)
 
-class PasswordResetConfirmView(generics.GenericAPIView):
-    """Подтверждение сброса пароля"""
+        return Response({
+            'message': 'Код верен'
+        }, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(generics.CreateAPIView):
+    """
+    Подтверждение сброса пароля с новым паролем
+    """
     serializer_class = PasswordResetConfirmSerializer
     permission_classes = [AllowAny]
 
-    def post(self, request, *args, **kwargs):
+    def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response({'message': 'Пароль успешно изменён'}, status=status.HTTP_200_OK)
+        user = serializer.save()
+
+        return Response({
+            'message': 'Пароль успешно изменён',
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': user.name
+            }
+        }, status=status.HTTP_200_OK)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_view(request):
     """
-    Выход из системы
-    Добавляем refresh token в чёрный список
+    Выход из системы (добавление токена в черный список)
     """
     try:
-        refresh_token = request.data.get('refresh_token')
+        refresh_token = request.data.get('refresh')
         if refresh_token:
             token = RefreshToken(refresh_token)
             token.blacklist()
 
         return Response({
-            'message': 'Выход выполнен успешно'
+            'message': 'Успешный выход из системы'
         }, status=status.HTTP_200_OK)
-
     except Exception as e:
         return Response({
             'error': 'Ошибка при выходе из системы'

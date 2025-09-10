@@ -13,11 +13,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     """Сериализатор для регистрации пользователей"""
 
     password = serializers.CharField(write_only=True, min_length=6)
-    password_confirm = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ('email', 'phone', 'name', 'second_name', 'password', 'password_confirm')
+        fields = ('email', 'phone', 'name', 'second_name', 'password')
 
     def validate_email(self, value):
         """Проверка формата и уникальности email"""
@@ -27,71 +26,111 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         if len(value) > 50:
             raise serializers.ValidationError("Email не должен превышать 50 символов")
 
+        # Проверка уникальности
+        if User.objects.filter(email=value.lower()).exists():
+            raise serializers.ValidationError("Пользователь с таким email уже существует")
+
         return value.lower()
+
+    def validate_phone(self, value):
+        """Проверка формата и уникальности телефона"""
+        # Убираем все кроме цифр и +
+        clean_phone = ''.join(char for char in value if char.isdigit() or char == '+')
+
+        if not clean_phone.startswith('+996'):
+            raise serializers.ValidationError("Телефон должен начинаться с +996")
+
+        if len(clean_phone) != 13:  # +996XXXXXXXXX
+            raise serializers.ValidationError("Некорректный формат номера телефона")
+
+        # Проверка уникальности
+        if User.objects.filter(phone=clean_phone).exists():
+            raise serializers.ValidationError("Пользователь с таким номером уже существует")
+
+        return clean_phone
 
     def validate_name(self, value):
         """Проверка имени"""
         if len(value.strip()) < 2:
             raise serializers.ValidationError("Имя должно содержать минимум 2 символа")
-        return value.title()
+        return value.strip().title()
 
     def validate_second_name(self, value):
         """Проверка фамилии"""
         if len(value.strip()) < 2:
             raise serializers.ValidationError("Фамилия должна содержать минимум 2 символа")
-        return value.title()
+        return value.strip().title()
 
-    def validate(self, attrs):
-        """Проверка совпадения паролей"""
-        if attrs['password'] != attrs['password_confirm']:
-            raise serializers.ValidationError("Пароли не совпадают")
-
-        # Проверка общей длины ФИО (15-24 символа по ТЗ)
-        full_name_length = len(attrs['name']) + len(attrs['second_name']) + 1  # +1 за пробел
-        if full_name_length < 15 or full_name_length > 24:
-            raise serializers.ValidationError("ФИО должно содержать от 15 до 24 символов")
-
-        return attrs
+    def validate_password(self, value):
+        """Базовая проверка пароля"""
+        if len(value) < 6:
+            raise serializers.ValidationError("Пароль должен содержать минимум 6 символов")
+        return value
 
     def create(self, validated_data):
-        """Создание пользователя через UserManager"""
-        validated_data.pop('password_confirm')
+        """Создание пользователя через UserManager с определением роли"""
+        return User.objects.create_user(**validated_data)
 
-        # UserManager.create_user автоматически определит роль и очистит пароль
-        user = User.objects.create_user(**validated_data)
 
-        # Отправляем приветственное письмо
-        EmailService.send_welcome_email(user)
+class CustomTokenObtainSerializer(serializers.Serializer):
+    """Кастомный сериализатор для получения токена"""
 
-        return user
+    username = serializers.CharField()  # email или phone
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        username = attrs.get('username')
+        password = attrs.get('password')
+
+        if username and password:
+            # Пробуем найти пользователя по email или phone
+            user = None
+            try:
+                # Сначала пробуем по email
+                if '@' in username:
+                    user = User.objects.get(email=username.lower())
+                else:
+                    # Затем по телефону
+                    clean_phone = ''.join(char for char in username if char.isdigit() or char == '+')
+                    user = User.objects.get(phone=clean_phone)
+            except User.DoesNotExist:
+                raise serializers.ValidationError("Неверные учетные данные")
+
+            # Проверяем пароль
+            if not user.check_password(password):
+                raise serializers.ValidationError("Неверные учетные данные")
+
+            # Проверяем статус пользователя
+            if not user.is_active:
+                raise serializers.ValidationError("Аккаунт заблокирован")
+
+            if not user.is_approved:
+                raise serializers.ValidationError("Аккаунт ожидает одобрения администратора")
+
+            attrs['user'] = user
+            return attrs
+        else:
+            raise serializers.ValidationError("Необходимо указать логин и пароль")
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """Сериализатор профиля пользователя"""
-    full_name = serializers.ReadOnlyField()
+
+    full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ('id', 'email', 'phone', 'name', 'second_name', 'full_name', 'role',
-                  'avatar', 'is_approved', 'is_active', 'created_at')
-        read_only_fields = ('id', 'role', 'is_approved', 'created_at')
+        fields = ('id', 'email', 'name', 'second_name', 'full_name', 'phone',
+                  'role', 'is_approved', 'is_active', 'avatar', 'created_at')
+        read_only_fields = ('id', 'email', 'role', 'is_approved', 'created_at')
 
-    def validate_avatar(self, value):
-        """Валидация загружаемого аватара"""
-        if value:
-            # Проверка размера файла (максимум 5MB)
-            if value.size > 5 * 1024 * 1024:
-                raise serializers.ValidationError("Размер файла не должен превышать 5MB")
-
-            # Проверка типа файла
-            if not value.content_type.startswith('image/'):
-                raise serializers.ValidationError("Файл должен быть изображением")
-
-        return value
+    def get_full_name(self, obj):
+        return obj.get_full_name()
 
 
 class UserListSerializer(serializers.ModelSerializer):
-    """Сериализатор для списка пользователей (для админа)"""
+    """Сериализатор для списка пользователей (админ)"""
+
     full_name = serializers.ReadOnlyField()
 
     class Meta:
@@ -128,7 +167,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
     def validate_email(self, value):
         """Проверяем существование пользователя"""
         try:
-            user = User.objects.get(email=value)
+            user = User.objects.get(email=value.lower())
             return value
         except User.DoesNotExist:
             raise serializers.ValidationError("Пользователь с таким email не найден")
@@ -136,7 +175,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
     def create(self, validated_data):
         """Создание запроса на сброс пароля"""
         email = validated_data['email']
-        user = User.objects.get(email=email)
+        user = User.objects.get(email=email.lower())
 
         # Генерируем 5-значный код
         code = str(random.randint(10000, 99999))
@@ -185,6 +224,12 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
             return value
         except PasswordResetRequest.DoesNotExist:
             raise serializers.ValidationError("Неверный или истёкший код")
+
+    def validate_new_password(self, value):
+        """Проверка нового пароля"""
+        if len(value) < 6:
+            raise serializers.ValidationError("Пароль должен содержать минимум 6 символов")
+        return value
 
     def save(self):
         code = self.validated_data['code']

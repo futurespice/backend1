@@ -22,7 +22,7 @@ DATABASES = {
 CORS_ALLOW_ALL_ORIGINS = True
 
 # Email backend for development
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 
 # Cache for development
 CACHES = {
@@ -34,3 +34,4 @@ CACHES = {
 # Celery settings for development
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
+
