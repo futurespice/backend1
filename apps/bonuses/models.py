@@ -1,196 +1,192 @@
 from django.db import models
 from django.conf import settings
 from decimal import Decimal
+from django.core.validators import MinValueValidator
 
 
 class BonusRule(models.Model):
     """Правила бонусной системы"""
-    name = models.CharField(max_length=100, verbose_name='Название правила')
+
+    name = models.CharField(max_length=200, verbose_name='Название правила')
     description = models.TextField(verbose_name='Описание')
 
-    # Каждый N-й товар бесплатно
-    bonus_threshold = models.PositiveIntegerField(
+    # Правило: каждый N-й товар бесплатно
+    every_nth_free = models.PositiveIntegerField(
         default=21,
         verbose_name='Каждый N-й товар бесплатно'
     )
 
+    # Применимость
+    applies_to_all_products = models.BooleanField(
+        default=True,
+        verbose_name='Применяется ко всем товарам'
+    )
+    products = models.ManyToManyField(
+        'products.Product',
+        blank=True,
+        verbose_name='Товары',
+        help_text='Если не выбрано - применяется ко всем'
+    )
+
     # Активность
     is_active = models.BooleanField(default=True, verbose_name='Активно')
+    start_date = models.DateField(null=True, blank=True, verbose_name='Дата начала')
+    end_date = models.DateField(null=True, blank=True, verbose_name='Дата окончания')
 
-    # Применимость
-    applies_to_partners = models.BooleanField(default=True, verbose_name='Применяется к партнерам')
-    applies_to_stores = models.BooleanField(default=True, verbose_name='Применяется к магазинам')
-
-    # Даты
-    valid_from = models.DateTimeField(verbose_name='Действует с')
-    valid_until = models.DateTimeField(null=True, blank=True, verbose_name='Действует до')
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
 
     class Meta:
         db_table = 'bonus_rules'
-        verbose_name = 'Правило бонусной системы'
-        verbose_name_plural = 'Правила бонусной системы'
-        ordering = ['-created_at']
+        verbose_name = 'Правило бонусов'
+        verbose_name_plural = 'Правила бонусов'
+        ordering = ['name']
 
     def __str__(self):
-        return f"{self.name} (каждый {self.bonus_threshold}-й товар)"
-
-    def is_valid_now(self):
-        """Проверить, действует ли правило сейчас"""
-        from django.utils import timezone
-        now = timezone.now()
-
-        if not self.is_active:
-            return False
-
-        if now < self.valid_from:
-            return False
-
-        if self.valid_until and now > self.valid_until:
-            return False
-
-        return True
+        return self.name
 
 
-class BonusCounter(models.Model):
-    """Счетчик бонусов для каждого магазина"""
-    store = models.OneToOneField(
+class BonusHistory(models.Model):
+    """История начисления бонусов"""
+
+    store = models.ForeignKey(
         'stores.Store',
         on_delete=models.CASCADE,
-        related_name='bonus_counter',
+        related_name='bonus_history',
         verbose_name='Магазин'
     )
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        related_name='bonus_history',
+        verbose_name='Товар'
+    )
+    order = models.ForeignKey(
+        'orders.Order',
+        on_delete=models.CASCADE,
+        related_name='bonus_history',
+        verbose_name='Заказ'
+    )
+    order_item = models.ForeignKey(
+        'orders.OrderItem',
+        on_delete=models.CASCADE,
+        related_name='bonus_history',
+        verbose_name='Позиция заказа'
+    )
 
-    # Счетчики
-    total_items_ordered = models.PositiveIntegerField(default=0, verbose_name='Всего заказано товаров')
-    bonus_items_received = models.PositiveIntegerField(default=0, verbose_name='Получено бонусных товаров')
+    # Количества
+    purchased_quantity = models.DecimalField(
+        max_digits=8,
+        decimal_places=3,
+        verbose_name='Купленное количество'
+    )
+    bonus_quantity = models.DecimalField(
+        max_digits=8,
+        decimal_places=3,
+        default=0,
+        verbose_name='Бонусное количество'
+    )
 
-    # Текущий прогресс до следующего бонуса
-    current_count = models.PositiveIntegerField(default=0, verbose_name='Текущий счет')
-    next_bonus_at = models.PositiveIntegerField(default=21, verbose_name='Следующий бонус на')
+    # Накопленное количество до этой покупки
+    cumulative_quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        verbose_name='Накопленное количество'
+    )
 
-    # Метаданные
-    last_bonus_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата последнего бонуса')
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'bonus_counters'
-        verbose_name = 'Счетчик бонусов'
-        verbose_name_plural = 'Счетчики бонусов'
-
-    def __str__(self):
-        return f"Бонусы {self.store.name}: {self.current_count}/{self.next_bonus_at}"
-
-    def add_items(self, quantity):
-        """Добавить товары в счетчик"""
-        from django.utils import timezone
-
-        bonus_rule = BonusRule.objects.filter(is_active=True).first()
-        if not bonus_rule:
-            return 0
-
-        threshold = bonus_rule.bonus_threshold
-
-        self.total_items_ordered += quantity
-        self.current_count += quantity
-
-        # Подсчитываем сколько бонусов заработано
-        bonus_items = 0
-        while self.current_count >= self.next_bonus_at:
-            bonus_items += 1
-            self.bonus_items_received += 1
-            self.current_count -= threshold
-            self.last_bonus_date = timezone.now()
-
-        self.save()
-        return bonus_items
-
-    def get_progress_to_next_bonus(self):
-        """Получить прогресс до следующего бонуса"""
-        bonus_rule = BonusRule.objects.filter(is_active=True).first()
-        if not bonus_rule:
-            return {'current': 0, 'needed': 21, 'progress': 0}
-
-        threshold = bonus_rule.bonus_threshold
-        needed = threshold - (self.current_count % threshold)
-        progress = (self.current_count % threshold) / threshold * 100
-
-        return {
-            'current': self.current_count % threshold,
-            'needed': needed,
-            'progress': round(progress, 1)
-        }
-
-
-class BonusTransaction(models.Model):
-    """История бонусных операций"""
-    TRANSACTION_TYPES = [
-        ('earned', 'Заработан'),
-        ('used', 'Использован'),
-        ('expired', 'Истек'),
-        ('cancelled', 'Отменен'),
-    ]
-
-    store = models.ForeignKey('stores.Store', on_delete=models.CASCADE, related_name='bonus_transactions')
-    order = models.ForeignKey('orders.Order', on_delete=models.CASCADE, null=True, blank=True)
-
-    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES, verbose_name='Тип операции')
-    quantity = models.PositiveIntegerField(verbose_name='Количество товаров')
-    amount_saved = models.DecimalField(
+    # Стоимости
+    unit_price = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=0,
-        verbose_name='Сэкономленная сумма'
+        verbose_name='Цена за единицу'
     )
-
-    description = models.TextField(verbose_name='Описание')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата операции')
-
-    class Meta:
-        db_table = 'bonus_transactions'
-        verbose_name = 'Бонусная операция'
-        verbose_name_plural = 'Бонусные операции'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f"{self.get_transaction_type_display()}: {self.quantity} шт. ({self.store.name})"
-
-
-class BonusStatistics(models.Model):
-    """Статистика бонусов по периодам"""
-    store = models.ForeignKey('stores.Store', on_delete=models.CASCADE, related_name='bonus_stats')
-    partner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        limit_choices_to={'role': 'partner'}
-    )
-
-    # Период
-    period_start = models.DateTimeField(verbose_name='Начало периода')
-    period_end = models.DateTimeField(verbose_name='Конец периода')
-
-    # Статистика
-    total_bonus_items = models.PositiveIntegerField(default=0, verbose_name='Всего бонусных товаров')
-    total_bonus_value = models.DecimalField(
+    bonus_discount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         default=0,
-        verbose_name='Общая стоимость бонусов'
+        verbose_name='Размер скидки'
     )
 
-    # Метаданные
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
 
     class Meta:
-        db_table = 'bonus_statistics'
-        verbose_name = 'Статистика бонусов'
-        verbose_name_plural = 'Статистика бонусов'
-        unique_together = ['store', 'partner', 'period_start', 'period_end']
-        ordering = ['-period_start']
+        db_table = 'bonus_history'
+        verbose_name = 'История бонусов'
+        verbose_name_plural = 'История бонусов'
+        ordering = ['-created_at']
+        unique_together = ['order_item']
 
     def __str__(self):
-        return f"Бонусы {self.store.name}: {self.total_bonus_items} шт."
+        return f"Бонус {self.store.store_name} - {self.product.name}"
+
+
+class BonusCalculation:
+    """Калькулятор бонусов"""
+
+    def __init__(self, rule_every_nth=21):
+        self.rule_every_nth = rule_every_nth
+
+    def calculate_bonus(self, previous_quantity, current_quantity, unit_price):
+        """
+        Рассчитать бонус для покупки
+
+        Args:
+            previous_quantity: Количество товара, купленного ранее
+            current_quantity: Количество в текущей покупке
+            unit_price: Цена за единицу товара
+
+        Returns:
+            dict: {
+                'bonus_quantity': Decimal,  # Количество бонусных товаров
+                'bonus_discount': Decimal,  # Размер скидки
+                'new_cumulative': Decimal   # Новое накопленное количество
+            }
+        """
+        previous_quantity = Decimal(str(previous_quantity))
+        current_quantity = Decimal(str(current_quantity))
+        unit_price = Decimal(str(unit_price))
+
+        # Новое накопленное количество
+        new_cumulative = previous_quantity + current_quantity
+
+        # Сколько было "бесплатных" товаров до этой покупки
+        previous_free_count = int(previous_quantity // self.rule_every_nth)
+
+        # Сколько будет "бесплатных" товаров после покупки
+        new_free_count = int(new_cumulative // self.rule_every_nth)
+
+        # Количество новых бонусных товаров
+        bonus_quantity = new_free_count - previous_free_count
+        bonus_quantity = max(0, min(bonus_quantity, int(current_quantity)))
+
+        # Размер скидки
+        bonus_discount = Decimal(str(bonus_quantity)) * unit_price
+
+        return {
+            'bonus_quantity': Decimal(str(bonus_quantity)),
+            'bonus_discount': bonus_discount,
+            'new_cumulative': new_cumulative
+        }
+
+    def get_store_product_total(self, store, product):
+        """Получить общее количество купленного товара магазином"""
+        from apps.orders.models import OrderItem
+
+        total = OrderItem.objects.filter(
+            order__store=store,
+            product=product,
+            order__status='completed'
+        ).aggregate(
+            total=models.Sum('quantity')
+        )['total']
+
+        return total or Decimal('0')
+
+    def preview_bonus(self, store, product, quantity):
+        """Предварительный расчёт бонуса без сохранения"""
+        current_total = self.get_store_product_total(store, product)
+        return self.calculate_bonus(
+            previous_quantity=current_total,
+            current_quantity=quantity,
+            unit_price=product.price
+        )

@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.urls import reverse
 from django.utils.safestring import mark_safe
-from .models import Store, StoreInventory, StoreRequest, StoreRequestItem
+from .models import Store, StoreInventory, StoreRequest
 
 
 class StoreInventoryInline(admin.TabularInline):
@@ -135,19 +135,6 @@ class StoreInventoryAdmin(admin.ModelAdmin):
         return request.user.is_superuser
 
 
-class StoreRequestItemInline(admin.TabularInline):
-    """Инлайн для позиций запроса"""
-    model = StoreRequestItem
-    extra = 0
-    readonly_fields = ['product', 'quantity']
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
-
 @admin.register(StoreRequest)
 class StoreRequestAdmin(admin.ModelAdmin):
     """Админка для запросов товаров"""
@@ -174,7 +161,6 @@ class StoreRequestAdmin(admin.ModelAdmin):
     )
 
     readonly_fields = ['requested_at', 'processed_at', 'delivered_at']
-    inlines = [StoreRequestItemInline]
 
     def status_display(self, obj):
         colors = {
@@ -219,20 +205,3 @@ class StoreRequestAdmin(admin.ModelAdmin):
         return False  # Запросы создаются только через API
 
 
-@admin.register(StoreRequestItem)
-class StoreRequestItemAdmin(admin.ModelAdmin):
-    """Админка для позиций запросов товаров"""
-
-    list_display = ['request', 'product', 'quantity']
-    list_filter = ['request__status', 'product__category']
-    search_fields = ['request__store__store_name', 'product__name']
-    ordering = ['-request__requested_at']
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False

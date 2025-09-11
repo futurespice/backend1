@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Store, StoreInventory, StoreRequest, StoreRequestItem
+from .models import Store, StoreInventory, StoreRequest
 from products.models import Product
 from regions.models import Region
 
@@ -81,7 +81,7 @@ class StoreRequestItemSerializer(serializers.ModelSerializer):
     product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
 
     class Meta:
-        model = StoreRequestItem
+        model = StoreRequest
         fields = [
             'id', 'product', 'product_name', 'product_unit', 'product_price',
             'quantity'
@@ -141,7 +141,7 @@ class StoreRequestCreateSerializer(serializers.ModelSerializer):
 
         # Создаём позиции
         for item_data in items_data:
-            StoreRequestItem.objects.create(request=request, **item_data)
+            StoreRequest.objects.create(request=request, **item_data)
 
         return request
 

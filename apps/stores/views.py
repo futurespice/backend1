@@ -6,7 +6,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Prefetch
 from django.shortcuts import get_object_or_404
 
-from .models import Store, StoreInventory, StoreRequest, StoreRequestItem
+from .models import Store, StoreInventory,StoreRequest
 from .serializers import (
     StoreSerializer, StoreCreateUpdateSerializer, StoreProfileSerializer,
     StoreInventorySerializer, StoreRequestSerializer, StoreRequestCreateSerializer,
@@ -124,7 +124,7 @@ class StoreRequestViewSet(viewsets.ModelViewSet):
     """ViewSet для запросов товаров от магазинов"""
 
     queryset = StoreRequest.objects.select_related('store', 'partner').prefetch_related(
-        Prefetch('items', queryset=StoreRequestItem.objects.select_related('product'))
+        Prefetch('items', queryset=StoreRequest.objects.select_related('product'))
     ).all()
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]

@@ -6,102 +6,103 @@ from django.utils import timezone
 
 
 class Expense(models.Model):
-    """
-    Расход из ТЗ 4.1: физический (ингредиент/упаковка) или накладной (аренда, ЗП).
+    """Расходы для себестоимости"""
 
-    Статусы:
-    - SUZERAIN: главный драйвер (фарш для пельменей, мука для теста)
-    - VASSAL: зависит от механического учета
-    - COMMONER: базовый расход
+    EXPENSE_TYPES = [
+        ('raw_material', 'Сырье'),
+        ('labor', 'Оплата труда'),
+        ('overhead', 'Накладные расходы'),
+        ('packaging', 'Упаковка'),
+        ('delivery', 'Доставка'),
+        ('utilities', 'Коммунальные услуги'),
+        ('rent', 'Аренда'),
+        ('taxes', 'Налоги'),
+        ('fuel', 'Топливо'),
+        ('equipment', 'Оборудование'),
+    ]
 
-    Состояния:
-    - MECHANICAL: ручной ввод сумм/объемов (становится VASSAL)
-    - AUTOMATIC: автоматический расчет
-    """
+    PERIOD_TYPES = [
+        ('daily', 'Ежедневно'),
+        ('monthly', 'Ежемесячно'),
+        ('per_unit', 'За единицу'),
+        ('per_batch', 'За партию'),
+    ]
 
-    class ExpenseType(models.TextChoices):
-        PHYSICAL = "physical", "Физический"  # ингредиенты, упаковка
-        OVERHEAD = "overhead", "Накладной"  # аренда, зп, налоги, свет
+    name = models.CharField(max_length=200, verbose_name='Название расхода')
+    expense_type = models.CharField(
+        max_length=20,
+        choices=EXPENSE_TYPES,
+        verbose_name='Тип расхода'
+    )
 
-    class ExpenseStatus(models.TextChoices):
-        SUZERAIN = "suzerain", "Сюзерен"  # главный драйвер
-        VASSAL = "vassal", "Вассал"  # зависимый от механики
-        COMMONER = "commoner", "Обыватель"  # базовый
+    # Единица измерения с учетом специфики бизнеса
+    UNIT_CHOICES = [
+        ('kg', 'кг'),
+        ('g', 'г'),
+        ('l', 'л'),
+        ('pcs', 'шт'),
+        ('bag', 'мешок'),
+        ('pack', 'пачка'),
+        ('batch', 'партия'),
+        ('person', 'человек'),
+        ('machine', 'машина'),
+        ('daily', 'в день'),
+        ('monthly', 'в месяц'),
+        ('hour', 'час'),
+    ]
 
-    class ExpenseState(models.TextChoices):
-        MECHANICAL = "mechanical", "Механический"  # ручной учет
-        AUTOMATIC = "automatic", "Автоматический"  # авто расчет
-
-    class Unit(models.TextChoices):
-        KG = "kg", "кг"
-        PCS = "pcs", "шт"
-
-    # Основные поля
-    type = models.CharField(max_length=20, choices=ExpenseType.choices)
-    name = models.CharField(max_length=120, db_index=True)
-
-    # Только для физических расходов
     unit = models.CharField(
-        max_length=8,
-        choices=Unit.choices,
-        null=True, blank=True,
-        help_text="Единица измерения для физических расходов"
+        max_length=10,
+        choices=UNIT_CHOICES,
+        verbose_name='Единица измерения'
     )
+
     price_per_unit = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        null=True, blank=True,
-        validators=[MinValueValidator(Decimal("0.01"))],
-        help_text="Цена за единицу (динамическая)"
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='Цена за единицу'
     )
 
-    # Поведение из ТЗ
-    status = models.CharField(
-        max_length=16,
-        choices=ExpenseStatus.choices,
-        default=ExpenseStatus.COMMONER
-    )
-    state = models.CharField(
-        max_length=16,
-        choices=ExpenseState.choices,
-        default=ExpenseState.AUTOMATIC
+    # Периодичность расхода
+    period_type = models.CharField(
+        max_length=20,
+        choices=PERIOD_TYPES,
+        default='per_unit',
+        verbose_name='Периодичность'
     )
 
-    # Применение
-    is_universal = models.BooleanField(
-        default=False,
-        help_text="Применяется ко всем товарам (универсальный тип)"
+    # Для месячных расходов - количество дней в месяце
+    days_per_month = models.PositiveIntegerField(
+        default=30,
+        verbose_name='Дней в месяце'
     )
-    is_active = models.BooleanField(default=True)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True, verbose_name='Активен')
+    notes = models.TextField(blank=True, verbose_name='Примечания')
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
 
     class Meta:
         db_table = 'expenses'
         verbose_name = 'Расход'
         verbose_name_plural = 'Расходы'
-        ordering = ['name']
-
-    def clean(self):
-        if self.type == self.ExpenseType.PHYSICAL:
-            if not self.unit:
-                raise ValidationError({"unit": "Физическому расходу нужна единица измерения"})
-            if self.price_per_unit is None:
-                raise ValidationError({"price_per_unit": "Физическому расходу нужна цена за единицу"})
-        else:  # OVERHEAD
-            if self.unit or self.price_per_unit is not None:
-                raise ValidationError("Накладным расходам не нужны unit/price_per_unit")
-
-        # Автоматический переход статуса при механическом учете
-        if self.state == self.ExpenseState.MECHANICAL and self.status == self.ExpenseStatus.COMMONER:
-            self.status = self.ExpenseStatus.VASSAL
-
-    def save(self, *args, **kwargs):
-        self.clean()
-        super().save(*args, **kwargs)
+        ordering = ['expense_type', 'name']
 
     def __str__(self):
-        return f"{self.name} ({self.get_type_display()})"
+        return f"{self.name} ({self.price_per_unit} сом/{self.unit})"
+
+    def get_daily_cost(self, quantity=1):
+        """Получить ежедневную стоимость расхода"""
+        base_cost = self.price_per_unit * Decimal(str(quantity))
+
+        if self.period_type == 'daily':
+            return base_cost
+        elif self.period_type == 'monthly':
+            return base_cost / self.days_per_month
+        else:
+            return base_cost
 
 
 class ProductExpense(models.Model):
@@ -454,7 +455,7 @@ class MonthlyOverheadBudget(models.Model):
         Expense,
         on_delete=models.CASCADE,
         related_name='monthly_budgets',
-        limit_choices_to={'type': Expense.ExpenseType.OVERHEAD}
+        limit_choices_to={'type': Expense.expense_type}
     )
 
     planned_amount = models.DecimalField(

@@ -35,6 +35,24 @@ class Category(models.Model):
     def __str__(self):
         return self.name
 
+    @property
+    def full_name(self):
+        """Полное имя категории с иерархией"""
+        parts = []
+        current = self
+        while current:
+            parts.append(current.name)
+            current = current.parent
+        return " > ".join(reversed(parts))
+
+    def get_all_children(self):
+        """Получить всех потомков рекурсивно"""
+        children = []
+        for child in self.children.all():
+            children.append(child)
+            children.extend(child.get_all_children())
+        return children
+
 
 class Product(models.Model):
     """Модель товара"""
@@ -129,27 +147,39 @@ class Product(models.Model):
 
     @property
     def is_low_stock(self):
-        """Проверка на низкий остаток"""
+        """Проверка низкого остатка"""
         return self.stock_quantity <= self.low_stock_threshold
 
     @property
-    def is_in_stock(self):
-        """Проверка наличия на складе"""
-        return self.stock_quantity > 0
+    def primary_image(self):
+        """Получить основное изображение"""
+        return self.images.filter(is_primary=True).first()
 
-    def update_stock(self, quantity, operation='add'):
-        """Обновление остатков на складе"""
-        if operation == 'add':
-            self.stock_quantity += Decimal(str(quantity))
-        elif operation == 'subtract':
-            if self.stock_quantity >= Decimal(str(quantity)):
-                self.stock_quantity -= Decimal(str(quantity))
-            else:
-                raise ValueError("Недостаточно товара на складе")
-        elif operation == 'set':
-            self.stock_quantity = Decimal(str(quantity))
+    def calculate_cost_price(self):
+        """Расчёт себестоимости через BOM"""
+        try:
+            bom = self.bom_specification
+            if not bom.is_active:
+                return None
 
-        self.save()
+            total_cost = Decimal('0')
+
+            for line in bom.lines.all():
+                if line.expense:
+                    # Стоимость расходного материала
+                    cost = line.expense.price_per_unit * line.quantity
+                    total_cost += cost
+                elif line.component_product:
+                    # Рекурсивный расчёт стоимости компонента
+                    component_cost = line.component_product.calculate_cost_price()
+                    if component_cost:
+                        cost = component_cost * line.quantity
+                        total_cost += cost
+
+            return total_cost
+
+        except:
+            return None
 
 
 class ProductImage(models.Model):
@@ -174,21 +204,32 @@ class ProductImage(models.Model):
         default=False,
         verbose_name='Основное изображение'
     )
+    order = models.PositiveIntegerField(
+        default=0,
+        verbose_name='Порядок'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
 
     class Meta:
         db_table = 'product_images'
         verbose_name = 'Изображение товара'
         verbose_name_plural = 'Изображения товаров'
-        ordering = ['-is_primary', 'id']
+        ordering = ['order', 'created_at']
 
     def __str__(self):
-        return f"{self.product.name} - изображение {self.id}"
+        return f"Изображение для {self.product.name}"
 
     def save(self, *args, **kwargs):
-        # Если это основное изображение, убираем флаг у других
+        # Если это первое изображение или устанавливается как основное
         if self.is_primary:
+            # Снимаем флаг основного с других изображений
             ProductImage.objects.filter(
                 product=self.product,
                 is_primary=True
-            ).exclude(id=self.id).update(is_primary=False)
+            ).exclude(pk=self.pk).update(is_primary=False)
+
+        # Если нет основного изображения, делаем это основным
+        elif not ProductImage.objects.filter(product=self.product, is_primary=True).exists():
+            self.is_primary = True
+
         super().save(*args, **kwargs)
