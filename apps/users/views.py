@@ -1,4 +1,5 @@
-from rest_framework import status, generics, permissions, viewsets, filters
+from django.contrib.auth import logout
+from rest_framework import status, generics, permissions, viewsets, filters, serializers
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -17,6 +18,8 @@ from .serializers import (
     UserListSerializer,
     UserModerationSerializer
 )
+from rest_framework.generics import GenericAPIView
+from drf_spectacular.utils import extend_schema
 from .permissions import IsAdminUser
 
 
@@ -225,22 +228,20 @@ class PasswordResetConfirmView(generics.CreateAPIView):
         }, status=status.HTTP_200_OK)
 
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def logout_view(request):
-    """
-    Выход из системы (добавление токена в черный список)
-    """
-    try:
-        refresh_token = request.data.get('refresh')
-        if refresh_token:
-            token = RefreshToken(refresh_token)
-            token.blacklist()
 
-        return Response({
-            'message': 'Успешный выход из системы'
-        }, status=status.HTTP_200_OK)
-    except Exception as e:
-        return Response({
-            'error': 'Ошибка при выходе из системы'
-        }, status=status.HTTP_400_BAD_REQUEST)
+
+class LogoutView(GenericAPIView):
+    """Выход из системы"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = serializers.Serializer  # добавляем для drf-spectacular
+
+    @extend_schema(
+        operation_id="logout",
+        responses={200: {"description": "Успешный выход"}}
+    )
+    def post(self, request):
+        logout(request)
+        return Response({"message": "Вы успешно вышли из системы"})
+
+# Исправляем в urls.py
+logout_view = LogoutView.as_view()

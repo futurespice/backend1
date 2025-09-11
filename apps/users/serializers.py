@@ -2,8 +2,11 @@ from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
+from django.db import models
 from .models import User, PasswordResetRequest
 import re
+from drf_spectacular.utils import extend_schema_field
+from typing import Dict, Any, Optional
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -119,6 +122,7 @@ class CustomTokenObtainSerializer(serializers.Serializer):
         return attrs
 
 
+# apps/users/serializers.py
 class UserProfileSerializer(serializers.ModelSerializer):
     """Сериализатор профиля пользователя"""
 
@@ -134,7 +138,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'email', 'role', 'is_approved', 'created_at', 'updated_at']
 
-    def get_store_info(self, obj):
+    @extend_schema_field({"type": "object", "nullable": True})
+    def get_store_info(self, obj) -> Optional[Dict[str, Any]]:
         """Информация о магазине для пользователей роли store"""
         if obj.role == 'store' and hasattr(obj, 'store_profile'):
             return {
@@ -145,6 +150,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return None
 
 
+# apps/users/serializers.py
 class UserListSerializer(serializers.ModelSerializer):
     """Сериализатор для списка пользователей (для админов)"""
 
@@ -155,22 +161,32 @@ class UserListSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'phone', 'full_name', 'role',
-            'is_approved', 'is_active', 'store_name', 'total_debt',
-            'created_at'
+            'id', 'email', 'phone', 'name', 'second_name', 'full_name',
+            'role', 'is_approved', 'is_active', 'store_name', 'total_debt',
+            'created_at', 'updated_at'  # используем поля из модели
         ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def get_store_name(self, obj):
-        """Название магазина"""
+    @extend_schema_field({"type": "string", "nullable": True})
+    def get_store_name(self, obj) -> Optional[str]:
+        """Название магазина для роли STORE"""
         if obj.role == 'store' and hasattr(obj, 'store_profile'):
             return obj.store_profile.store_name
         return None
 
-    def get_total_debt(self, obj):
-        """Общий долг магазина"""
+    @extend_schema_field({"type": "string"})
+    def get_total_debt(self, obj) -> str:
+        """Общая сумма долга"""
         if obj.role == 'store' and hasattr(obj, 'store_profile'):
-            return float(obj.store_profile.total_debt)
-        return 0
+            from apps.debts.models import Debt
+            total = Debt.objects.filter(
+                store=obj.store_profile,
+                is_active=True
+            ).aggregate(
+                total=models.Sum('amount')
+            )['total']
+            return str(total or 0)
+        return "0"
 
 
 class UserModerationSerializer(serializers.ModelSerializer):

@@ -552,3 +552,4 @@ class CartItem(models.Model):
     def total_price(self):
         """Общая стоимость позиции"""
         return self.quantity * self.product.price
+

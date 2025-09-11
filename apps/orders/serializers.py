@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Order, OrderItem, ProductRequest, ProductRequestItem
-
+from drf_spectacular.utils import extend_schema_field
 
 class OrderItemSerializer(serializers.ModelSerializer):
     """Сериализатор позиции заказа"""
@@ -17,18 +17,19 @@ class OrderItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['unit_price', 'total_price', 'bonus_quantity', 'bonus_discount']
 
 
+# apps/orders/serializers.py
 class OrderSerializer(serializers.ModelSerializer):
     """Сериализатор заказа"""
 
     store_name = serializers.CharField(source='store.store_name', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
+    partner_name = serializers.CharField(source='store.partner.get_full_name', read_only=True)  # изменили путь
     items = OrderItemSerializer(many=True, read_only=True)
     items_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
-            'id', 'store', 'store_name', 'partner', 'partner_name',
+            'id', 'store', 'store_name', 'partner_name',  # убрали partner
             'status', 'order_date', 'confirmed_date', 'completed_date',
             'subtotal', 'bonus_discount', 'total_amount',
             'payment_amount', 'debt_amount', 'bonus_items_count',
@@ -39,7 +40,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'subtotal', 'bonus_discount', 'total_amount', 'debt_amount'
         ]
 
-    def get_items_count(self, obj):
+    @extend_schema_field({"type": "integer"})
+    def get_items_count(self, obj) -> int:
         return obj.items.count()
 
 
@@ -50,7 +52,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ['partner', 'payment_amount', 'notes', 'items']
+        fields = ['payment_amount', 'notes', 'items']  # убрали partner
 
     def validate_items(self, value):
         if not value:
@@ -106,11 +108,11 @@ class ProductRequestSerializer(serializers.ModelSerializer):
         model = ProductRequest
         fields = [
             'id', 'partner', 'partner_name', 'status',
-            'requested_at', 'processed_at',
+            'requested_at', 'reviewed_at',
             'partner_notes', 'admin_notes',
             'items', 'items_count'
         ]
-        read_only_fields = ['requested_at', 'processed_at']
+        read_only_fields = ['requested_at', 'reviewed_at']
 
     def get_items_count(self, obj):
         return obj.items.count()

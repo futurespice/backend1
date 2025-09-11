@@ -1,3 +1,5 @@
+from typing import Optional
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from django.db import models
 from .models import BonusRule, BonusHistory, BonusBalance, BonusRuleUsage
@@ -23,23 +25,21 @@ class BonusRuleSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at', 'created_by']
 
-    def get_products_count(self, obj):
+    # apps/bonuses/serializers.py
+    @extend_schema_field({"type": "integer"})
+    def get_products_count(self, obj) -> int:
         """Количество товаров в правиле"""
-        if obj.applies_to_all_products:
-            return "Все товары"
         return obj.products.count()
 
-    def get_stores_count(self, obj):
-        """Количество магазинов в правиле"""
-        if obj.applies_to_all_stores:
-            return "Все магазины"
+    @extend_schema_field({"type": "integer"})
+    def get_stores_count(self, obj) -> int:
+        """Количество магазинов"""
         return obj.stores.count()
 
-    def get_usage_count(self, obj):
-        """Количество использований правила"""
-        return obj.usage_stats.aggregate(
-            total=models.Sum('times_used')
-        )['total'] or 0
+    @extend_schema_field({"type": "integer"})
+    def get_usage_count(self, obj) -> int:
+        """Количество использований"""
+        return obj.bonus_histories.count()
 
 
 class BonusRuleCreateUpdateSerializer(serializers.ModelSerializer):
@@ -101,9 +101,28 @@ class BonusHistorySerializer(serializers.ModelSerializer):
             'created_at', 'notes'
         ]
 
-    def get_order_number(self, obj):
+    # apps/bonuses/serializers.py
+    @extend_schema_field({"type": "string", "nullable": True})
+    def get_order_number(self, obj) -> Optional[str]:
         """Номер заказа"""
-        return f"#{obj.order.id}" if obj.order else None
+        if obj.order:
+            return f"#{obj.order.id}"
+        return None
+
+    @extend_schema_field({"type": "integer"})
+    def get_products_count(self, obj) -> int:
+        """Количество товаров в правиле"""
+        return obj.products.count()
+
+    @extend_schema_field({"type": "integer"})
+    def get_stores_count(self, obj) -> int:
+        """Количество магазинов"""
+        return obj.stores.count()
+
+    @extend_schema_field({"type": "integer"})
+    def get_usage_count(self, obj) -> int:
+        """Количество использований"""
+        return obj.bonus_histories.count()
 
 
 class BonusBalanceSerializer(serializers.ModelSerializer):

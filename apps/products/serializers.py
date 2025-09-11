@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Category, Product, ProductImage, ProductCharacteristic, ProductPriceHistory
-
+from drf_spectacular.utils import extend_schema_field
 
 class CategorySerializer(serializers.ModelSerializer):
     """Сериализатор категорий"""
@@ -222,3 +222,20 @@ class ProductAnalyticsSerializer(serializers.Serializer):
     total_stock_value = serializers.DecimalField(max_digits=15, decimal_places=2)
     top_categories = serializers.ListField()
     price_ranges = serializers.DictField()
+
+    @extend_schema_field({"type": "string"})
+    def full_name(self, obj) -> str:
+        return obj.get_full_name()
+
+    @extend_schema_field({"type": "boolean"})
+    def is_in_stock(self, obj) -> bool:
+        return obj.stock_quantity > 0
+
+    @extend_schema_field({"type": "number", "format": "float"})
+    def profit_margin(self, obj) -> float:
+        return obj.get_profit_margin()
+
+    # apps/stores/serializers.py
+    @extend_schema_field({"type": "object"})
+    def get_coordinates(self, obj) -> dict:
+        return obj.get_coordinates()

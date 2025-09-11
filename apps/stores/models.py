@@ -290,50 +290,14 @@ class PartnerInventory(models.Model):
         return self.quantity - self.reserved_quantity
 
 
+# apps/stores/models.py - исправляем AdminInventory
 class AdminInventory(models.Model):
-    """Главный склад администратора"""
-
-    product = models.OneToOneField(
-        'products.Product',
-        on_delete=models.CASCADE,
-        related_name='admin_inventory',
-        verbose_name='Товар'
-    )
-    quantity = models.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Количество на главном складе'
-    )
-    reserved_for_partners = models.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Зарезервировано для партнёров'
-    )
-    last_updated = models.DateTimeField(auto_now=True, verbose_name='Последнее обновление')
-
-    class Meta:
-        db_table = 'admin_inventory'
-        verbose_name = 'Главный склад'
-        verbose_name_plural = 'Главный склад'
-
-    def __str__(self):
-        return f"Главный склад - {self.product.name}: {self.available_quantity}"
-
-    @property
-    def available_quantity(self):
-        """Доступное для выдачи партнёрам"""
-        return self.quantity - self.reserved_for_partners
-
-    """Позиции в запросе товаров"""
+    """Позиции в запросе товаров (переименованная модель)"""
 
     request = models.ForeignKey(
         StoreRequest,
         on_delete=models.CASCADE,
-        related_name='items',
+        related_name='items',  # оставляем как есть
         verbose_name='Запрос'
     )
     product = models.ForeignKey(
@@ -378,5 +342,45 @@ class AdminInventory(models.Model):
 
     @property
     def final_quantity(self):
-        """Итоговое количество (доставленное или одобренное)"""
+        """Итоговое количество"""
         return self.delivered_quantity or self.approved_quantity or self.quantity
+
+
+# apps/stores/models.py - добавляем новую модель для главного склада
+class MainInventory(models.Model):
+    """Главный склад администратора"""
+
+    product = models.OneToOneField(
+        'products.Product',
+        on_delete=models.CASCADE,
+        related_name='main_inventory',
+        verbose_name='Товар'
+    )
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Количество на главном складе'
+    )
+    reserved_for_partners = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Зарезервировано для партнёров'
+    )
+    last_updated = models.DateTimeField(auto_now=True, verbose_name='Последнее обновление')
+
+    class Meta:
+        db_table = 'main_inventory'
+        verbose_name = 'Главный склад'
+        verbose_name_plural = 'Главный склад'
+
+    def __str__(self):
+        return f"Главный склад - {self.product.name}: {self.available_quantity}"
+
+    @property
+    def available_quantity(self):
+        """Доступное для выдачи партнёрам"""
+        return self.quantity - self.reserved_for_partners

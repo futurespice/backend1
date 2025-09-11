@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Store, StoreInventory, StoreRequest
+from .models import Store, StoreInventory, StoreRequest, AdminInventory
 from products.models import Product
 from regions.models import Region
 
@@ -73,6 +73,7 @@ class StoreInventorySerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'last_updated']
 
 
+# apps/stores/serializers.py - исправляем сериализатор
 class StoreRequestItemSerializer(serializers.ModelSerializer):
     """Сериализатор позиции запроса"""
 
@@ -81,13 +82,12 @@ class StoreRequestItemSerializer(serializers.ModelSerializer):
     product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
 
     class Meta:
-        model = StoreRequest
+        model = AdminInventory  # используем существующую модель
         fields = [
             'id', 'product', 'product_name', 'product_unit', 'product_price',
-            'quantity'
+            'quantity', 'approved_quantity', 'delivered_quantity'
         ]
         read_only_fields = ['id']
-
 
 class StoreRequestSerializer(serializers.ModelSerializer):
     """Сериализатор запроса товаров"""
@@ -129,19 +129,18 @@ class StoreRequestCreateSerializer(serializers.ModelSerializer):
 
         return value
 
+    # apps/stores/serializers.py - исправляем create метод
     def create(self, validated_data):
         items_data = validated_data.pop('items')
 
-        # Получаем магазин из текущего пользователя
         store = self.context['request'].user.store_profile
         validated_data['store'] = store
 
-        # Создаём запрос
         request = StoreRequest.objects.create(**validated_data)
 
         # Создаём позиции
         for item_data in items_data:
-            StoreRequest.objects.create(request=request, **item_data)
+            AdminInventory.objects.create(request=request, **item_data)
 
         return request
 

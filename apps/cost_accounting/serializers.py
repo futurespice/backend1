@@ -3,7 +3,8 @@ from .models import (
     Expense, ProductExpense, DailyExpenseLog, ProductionBatch,
     MonthlyOverheadBudget, BillOfMaterial, BOMLine
 )
-
+from drf_spectacular.utils import extend_schema_field
+from typing import Optional, Dict, Any
 
 class ExpenseSerializer(serializers.ModelSerializer):
     """Сериализатор расходов"""
@@ -69,7 +70,8 @@ class BOMLineSerializer(serializers.ModelSerializer):
         fields = ['id', 'expense', 'expense_name', 'expense_unit', 'expense_price',
                   'quantity', 'line_total_cost', 'notes']
 
-    def get_line_total_cost(self, obj):
+    @extend_schema_field({"type": "number", "format": "float"})
+    def get_line_total_cost(self, obj) -> float:
         """Расчёт стоимости строки"""
         return float(obj.quantity * obj.expense.price_per_unit)
 
@@ -84,16 +86,20 @@ class BOMSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BillOfMaterial
-        fields = ['id', 'name', 'description', 'product', 'product_name',
-                  'output_quantity', 'output_unit', 'is_active', 'lines',
-                  'total_cost', 'cost_per_unit', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at']
+        fields = [
+            'id', 'product', 'product_name', 'name', 'description',
+            'output_quantity', 'is_active', 'lines', 'total_cost', 'cost_per_unit',
+            'created_at'
+        ]
+        read_only_fields = ['created_at']
 
-    def get_total_cost(self, obj):
+    @extend_schema_field({"type": "number", "format": "float"})
+    def get_total_cost(self, obj) -> float:
         """Общая стоимость рецептуры"""
         return float(sum(line.quantity * line.expense.price_per_unit for line in obj.lines.all()))
 
-    def get_cost_per_unit(self, obj):
+    @extend_schema_field({"type": "number", "format": "float"})
+    def get_cost_per_unit(self, obj) -> float:
         """Себестоимость единицы продукции"""
         total_cost = self.get_total_cost(obj)
         if obj.output_quantity > 0:
@@ -112,33 +118,19 @@ class CostAnalyticsSerializer(serializers.Serializer):
     top_expenses = serializers.ListField()
 
 
-class BatchCostCalculationSerializer(serializers.Serializer):
-    """Сериализатор расчёта себестоимости партии"""
-
-    product_id = serializers.IntegerField()
-    quantity = serializers.DecimalField(max_digits=10, decimal_places=3)
-    production_date = serializers.DateField()
-    notes = serializers.CharField(max_length=500, required=False)
-
-    def validate_product_id(self, value):
-        """Проверяем существование товара"""
-        from apps.products.models import Product
-        try:
-            Product.objects.get(id=value)
-        except Product.DoesNotExist:
-            raise serializers.ValidationError("Товар не найден")
-        return value
-
-
 class BonusAnalysisSerializer(serializers.Serializer):
-    """Сериализатор анализа влияния бонусов на себестоимость"""
+    """Сериализатор анализа бонусов"""
 
-    total_bonus_cost = serializers.FloatField()
-    bonus_percentage_of_revenue = serializers.FloatField()
-    products_affected = serializers.IntegerField()
-    average_bonus_per_order = serializers.FloatField()
-    recommendations = serializers.ListField(child=serializers.CharField())
+    message = serializers.CharField()
 
+
+class BatchCostCalculationSerializer(serializers.Serializer):
+    """Сериализатор расчета стоимости партии"""
+
+    product_id = serializers.IntegerField(write_only=True)
+    quantity = serializers.DecimalField(max_digits=10, decimal_places=3, write_only=True)
+    total_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    cost_per_unit = serializers.DecimalField(max_digits=10, decimal_places=4, read_only=True)
 
 class QuickSetupSerializer(serializers.Serializer):
     """Сериализатор быстрой настройки"""
@@ -146,3 +138,5 @@ class QuickSetupSerializer(serializers.Serializer):
     create_default_expenses = serializers.BooleanField(default=True)
     create_sample_bom = serializers.BooleanField(default=False)
     setup_monthly_budgets = serializers.BooleanField(default=False)
+
+

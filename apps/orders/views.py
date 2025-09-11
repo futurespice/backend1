@@ -1,9 +1,10 @@
-from rest_framework import viewsets, permissions, status, generics
+from rest_framework import viewsets, permissions, status, generics, serializers
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 from django.db.models import Q
+from drf_spectacular.utils import extend_schema
 
 from .models import Order, OrderItem, ProductRequest, ProductRequestItem
 from .serializers import (
@@ -16,10 +17,10 @@ from users.permissions import IsAdminUser, IsPartnerUser, IsStoreUser
 class OrderViewSet(viewsets.ModelViewSet):
     """ViewSet для заказов"""
 
-    queryset = Order.objects.select_related('store', 'partner').prefetch_related('items')
+    queryset = Order.objects.select_related('store', 'store__partner').prefetch_related( 'items')  # исправили select_related
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'store', 'partner']
+    filterset_fields = ['status', 'store']  # убрали partner
     search_fields = ['notes', 'store__store_name']
     ordering_fields = ['order_date', 'total_amount']
     ordering = ['-order_date']
@@ -41,29 +42,29 @@ class OrderViewSet(viewsets.ModelViewSet):
         user = self.request.user
 
         if user.role == 'store':
-            # Магазин видит только свои заказы
+                # Магазин видит только свои заказы
             qs = qs.filter(store__user=user)
         elif user.role == 'partner':
-            # Партнёр видит заказы своих магазинов
-            qs = qs.filter(partner=user)
+                # Партнёр видит заказы своих магазинов
+            qs = qs.filter(store__partner=user)  # исправили путь
 
         return qs
 
     @action(detail=True, methods=['post'], permission_classes=[IsPartnerUser])
     def confirm(self, request, pk=None):
-        """Подтвердить заказ (только партнёр)"""
         order = self.get_object()
 
-        if order.status != 'pending':
+            # Проверяем права
+        if request.user.role == 'partner' and order.store.partner != request.user:  # исправили путь
             return Response(
-                {'error': 'Можно подтвердить только заказы в статусе "Ожидает подтверждения"'},
-                status=status.HTTP_400_BAD_REQUEST
+                {'error': 'Нет прав на подтверждение этого заказа'},
+                status=status.HTTP_403_FORBIDDEN
             )
 
-        if order.partner != request.user:
-            return Response(
-                {'error': 'Вы можете подтверждать только свои заказы'},
-                status=status.HTTP_403_FORBIDDEN
+        if order.status != 'pending':
+             return Response(
+                {'error': 'Можно подтвердить только заказы в статусе "Ожидает"'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         order.confirm()
@@ -223,8 +224,14 @@ class OrderCreateView(generics.CreateAPIView):
 
 class BonusCalculationView(generics.GenericAPIView):
     """Предварительный расчёт бонусов"""
+    permission_classes = [IsStoreUser]
 
-    permission_classes = [permissions.IsAuthenticated]
+    @extend_schema(
+        operation_id="order_bonus_calculation",
+        tags=["Orders"],
+        request=None,
+        responses={200: {"description": "Расчет бонусов"}}
+    )
 
     def post(self, request):
         """
@@ -255,10 +262,10 @@ class BonusCalculationView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        from apps.bonuses.models import BonusCalculation
-        from apps.products.models import Product
+        from bonuses.models import BonusCalculator
+        from products.models import Product
 
-        calculator = BonusCalculation()
+        calculator = BonusCalculator()
         results = []
         total_bonus_discount = 0
 

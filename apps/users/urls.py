@@ -4,11 +4,13 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     UserRegistrationView, CustomTokenObtainPairView, UserProfileView,
     UserListViewSet, PasswordResetRequestView, PasswordResetCodeView,
-    PasswordResetConfirmView, logout_view
+    PasswordResetConfirmView, LogoutView
 )
+
 
 router = DefaultRouter()
 router.register(r'users', UserListViewSet, basename='users')
+logout_view = LogoutView.as_view()
 
 app_name = 'users'
 
@@ -30,3 +32,4 @@ urlpatterns = [
     # Управление пользователями (админ)
     path('', include(router.urls)),
 ]
+

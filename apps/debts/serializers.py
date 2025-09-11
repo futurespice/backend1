@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from decimal import Decimal
 from .models import Debt, DebtPayment, DebtSummary
-
+from drf_spectacular.utils import extend_schema_field
 
 class DebtPaymentSerializer(serializers.ModelSerializer):
     """Сериализатор платежей по долгам"""
@@ -37,7 +37,9 @@ class DebtSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'paid_at', 'is_paid']
 
-    def get_payments_count(self, obj):
+    @extend_schema_field({"type": "integer"})
+    def get_payments_count(self, obj) -> int:
+        """Количество платежей"""
         return obj.payments.count()
 
 
