@@ -1,34 +1,30 @@
 from django.db import models
 from django.conf import settings
-from decimal import Decimal
 from django.core.validators import MinValueValidator
 from django.utils import timezone
 from django.core.exceptions import ObjectDoesNotExist
+from decimal import Decimal
 
 
-class StoreApplication(models.Model):
-    """Заявка магазина партнёру на поставку товаров (не заказ клиента!)"""
+# --- Запросы товаров от партнёров ---
+
+class ProductRequest(models.Model):
+    """Запрос товаров от партнёра (заявка на поставку)"""
+
     STATUS_CHOICES = [
         ('pending', 'Ожидает рассмотрения'),
-        ('approved', 'Одобрена'),
-        ('rejected', 'Отклонена'),
-        ('fulfilled', 'Выполнена'),
-        ('cancelled', 'Отменена'),
+        ('approved', 'Одобрен'),
+        ('partially_approved', 'Частично одобрен'),
+        ('rejected', 'Отклонён'),
+        ('cancelled', 'Отменён'),
     ]
 
-    # Участники
-    store = models.ForeignKey(
-        'stores.Store',
-        on_delete=models.CASCADE,
-        related_name='applications',
-        verbose_name='Магазин'
-    )
     partner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='store_applications',
+        related_name='product_requests',
         limit_choices_to={'role': 'partner'},
-        verbose_name='Партнер'
+        verbose_name='Партнёр'
     )
 
     # Статус и даты
@@ -38,95 +34,107 @@ class StoreApplication(models.Model):
         default='pending',
         verbose_name='Статус'
     )
-    application_date = models.DateTimeField(auto_now_add=True, verbose_name='Дата заявки')
-    approved_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата одобрения')
-    fulfilled_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата выполнения')
+    requested_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата запроса')
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата рассмотрения')
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_requests',
+        verbose_name='Рассмотрел'
+    )
+
+    # Суммы
+    total_requested_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Общая сумма запроса'
+    )
+    total_approved_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Одобренная сумма'
+    )
 
     # Комментарии
-    store_notes = models.TextField(blank=True, verbose_name='Комментарий магазина')
     partner_notes = models.TextField(blank=True, verbose_name='Комментарий партнёра')
+    admin_notes = models.TextField(blank=True, verbose_name='Комментарий администратора')
 
     class Meta:
-        db_table = 'store_applications'
-        verbose_name = 'Заявка магазина'
-        verbose_name_plural = 'Заявки магазинов'
-        ordering = ['-application_date']
+        db_table = 'product_requests'
+        verbose_name = 'Запрос товаров'
+        verbose_name_plural = 'Запросы товаров'
+        ordering = ['-requested_at']
 
     def __str__(self):
-        return f"Заявка #{self.id} от {self.store.store_name}"
+        return f"Запрос #{self.id} от {self.partner.get_full_name()}"
 
-    def approve(self):
-        """Одобрить заявку и зарезервировать товары у партнёра."""
-        if self.status == 'pending':
-            self.status = 'approved'
-            self.approved_date = timezone.now()
-            self.save()
+    def calculate_totals(self):
+        """Пересчёт итоговых сумм"""
+        items = self.items.all()
 
-            # Резервируем товары у партнёра
-            for item in self.items.all():
-                try:
-                    partner_inventory = self.partner.partner_inventory.get(product=item.product)
-                    partner_inventory.reserved_quantity += item.final_quantity
-                    partner_inventory.save()
-                except ObjectDoesNotExist:
-                    # Если у партнера нет такой позиции в инвентаре, это ошибка в данных
-                    # В реальном проекте здесь стоит добавить логирование
-                    pass
+        self.total_requested_amount = sum(
+            item.requested_quantity * item.unit_price for item in items
+        )
+        self.total_approved_amount = sum(
+            item.get_approved_quantity() * item.unit_price for item in items
+        )
 
-    def fulfill(self):
-        """Выполнить заявку - передать товары магазину."""
-        if self.status == 'approved':
-            self.status = 'fulfilled'
-            self.fulfilled_date = timezone.now()
-            self.save()
+        self.save(update_fields=['total_requested_amount', 'total_approved_amount'])
 
-            # Переносим товары от партнёра к магазину
-            for item in self.items.all():
-                quantity_to_transfer = item.final_quantity
+    def approve(self, reviewed_by, admin_notes=''):
+        """Одобрить запрос"""
+        self.status = 'approved'
+        self.reviewed_at = timezone.now()
+        self.reviewed_by = reviewed_by
+        self.admin_notes = admin_notes
+        self.save()
 
-                # Уменьшаем количество на складе партнёра
-                try:
-                    partner_inventory = self.partner.partner_inventory.get(product=item.product)
-                    partner_inventory.quantity -= quantity_to_transfer
-                    partner_inventory.reserved_quantity -= quantity_to_transfer
-                    partner_inventory.save()
-                except ObjectDoesNotExist:
-                    # Эта ошибка не должна происходить, если заявка была корректно одобрена
-                    pass
+        # Создаём поставки товаров
+        self._create_supply_orders()
 
-                # Добавляем на склад магазина
-                store_inventory, created = self.store.inventory.get_or_create(
-                    product=item.product,
-                    defaults={'quantity': Decimal('0')}
-                )
-                store_inventory.quantity += quantity_to_transfer
-                store_inventory.save()
+    def reject(self, reviewed_by, admin_notes=''):
+        """Отклонить запрос"""
+        self.status = 'rejected'
+        self.reviewed_at = timezone.now()
+        self.reviewed_by = reviewed_by
+        self.admin_notes = admin_notes
+        self.save()
+
+    def _create_supply_orders(self):
+        """Создание заказов поставки товаров"""
+        for item in self.items.filter(approved_quantity__gt=0):
+            # Здесь будет логика создания заказов поставки
+            pass
 
 
-class StoreApplicationItem(models.Model):
-    """Позиция в заявке магазина."""
+class ProductRequestItem(models.Model):
+    """Позиция в запросе товаров"""
 
-    application = models.ForeignKey(
-        StoreApplication,
+    request = models.ForeignKey(
+        ProductRequest,
         on_delete=models.CASCADE,
         related_name='items',
-        verbose_name='Заявка'
+        verbose_name='Запрос'
     )
     product = models.ForeignKey(
         'products.Product',
         on_delete=models.CASCADE,
         verbose_name='Товар'
     )
+
+    # Количества
     requested_quantity = models.DecimalField(
-        max_digits=8,
+        max_digits=10,
         decimal_places=3,
         validators=[MinValueValidator(Decimal('0.001'))],
-        verbose_name='Запрашиваемое количество'
+        verbose_name='Запрошенное количество'
     )
-
-    # Партнёр может одобрить меньшее количество
     approved_quantity = models.DecimalField(
-        max_digits=8,
+        max_digits=10,
         decimal_places=3,
         null=True,
         blank=True,
@@ -134,25 +142,47 @@ class StoreApplicationItem(models.Model):
         verbose_name='Одобренное количество'
     )
 
+    # Цена на момент запроса
+    unit_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='Цена за единицу'
+    )
+
+    # Комментарии
+    notes = models.TextField(blank=True, verbose_name='Примечания')
+
     class Meta:
-        db_table = 'store_application_items'
-        verbose_name = 'Позиция заявки'
-        verbose_name_plural = 'Позиции заявок'
-        unique_together = ['application', 'product']
+        db_table = 'product_request_items'
+        verbose_name = 'Позиция запроса товаров'
+        verbose_name_plural = 'Позиции запросов товаров'
+        unique_together = ['request', 'product']
 
     def __str__(self):
-        return f"{self.product.name} x {self.requested_quantity}"
+        return f"{self.product.name} - {self.requested_quantity} {self.product.unit}"
 
     @property
-    def final_quantity(self):
-        """Итоговое количество для передачи (одобренное или, если нет, запрошенное)."""
+    def total_requested_amount(self):
+        """Общая сумма запрошенного товара"""
+        return self.requested_quantity * self.unit_price
+
+    @property
+    def total_approved_amount(self):
+        """Общая сумма одобренного товара"""
+        approved_qty = self.approved_quantity or Decimal('0')
+        return approved_qty * self.unit_price
+
+    def get_approved_quantity(self):
+        """Получить одобренное количество (если не указано, то запрошенное)"""
         return self.approved_quantity if self.approved_quantity is not None else self.requested_quantity
 
 
 # --- Заказы клиентов в магазинах ---
 
 class Order(models.Model):
-    """Заказ клиента в магазине (продажа)."""
+    """Заказ клиента в магазине (продажа)"""
+
     STATUS_CHOICES = [
         ('pending', 'Ожидает подтверждения'),
         ('confirmed', 'Подтвержден'),
@@ -166,56 +196,133 @@ class Order(models.Model):
         related_name='customer_orders',
         verbose_name='Магазин'
     )
+
     # Клиент (опционально)
     customer_name = models.CharField(max_length=200, blank=True, verbose_name='Имя клиента')
     customer_phone = models.CharField(max_length=20, blank=True, verbose_name='Телефон клиента')
+    customer_address = models.TextField(blank=True, verbose_name='Адрес клиента')
 
     # Статус и даты
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='Статус')
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        verbose_name='Статус'
+    )
     order_date = models.DateTimeField(auto_now_add=True, verbose_name='Дата заказа')
     confirmed_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата подтверждения')
     completed_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата выполнения')
+    delivery_date = models.DateTimeField(null=True, blank=True, verbose_name='Дата доставки')
 
     # Суммы
-    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Подытог')
-    bonus_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Скидка по бонусам')
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Итоговая сумма')
+    subtotal = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Подытог'
+    )
+    bonus_discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Скидка по бонусам'
+    )
+    total_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Итоговая сумма'
+    )
 
     # Оплата
     payment_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0,
+        max_digits=12,
+        decimal_places=2,
+        default=0,
         validators=[MinValueValidator(Decimal('0'))],
         verbose_name='Сумма оплаты'
     )
-    debt_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Сумма долга')
+    debt_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Сумма долга'
+    )
 
     # Бонусная информация
-    bonus_items_count = models.PositiveIntegerField(default=0, verbose_name='Количество бонусных товаров')
-    notes = models.TextField(blank=True, verbose_name='Комментарии')
+    bonus_items_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name='Количество бонусных товаров'
+    )
+    bonus_points_earned = models.PositiveIntegerField(
+        default=0,
+        verbose_name='Заработано бонусных очков'
+    )
+    bonus_points_used = models.PositiveIntegerField(
+        default=0,
+        verbose_name='Использовано бонусных очков'
+    )
+
+    # Доставка
+    delivery_required = models.BooleanField(default=False, verbose_name='Требуется доставка')
+    delivery_cost = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=0,
+        verbose_name='Стоимость доставки'
+    )
+
+    # Комментарии
+    notes = models.TextField(blank=True, verbose_name='Комментарии к заказу')
+    internal_notes = models.TextField(blank=True, verbose_name='Внутренние комментарии')
+
+    # Метаданные
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        verbose_name='Создал заказ'
+    )
 
     class Meta:
         db_table = 'customer_orders'
         verbose_name = 'Заказ клиента'
         verbose_name_plural = 'Заказы клиентов'
         ordering = ['-order_date']
+        indexes = [
+            models.Index(fields=['store', 'status']),
+            models.Index(fields=['order_date']),
+            models.Index(fields=['customer_phone']),
+        ]
 
     def __str__(self):
         return f"Заказ #{self.id} в {self.store.store_name}"
 
     def calculate_totals(self):
-        """Пересчёт итоговых сумм заказа на основе его позиций."""
+        """Пересчёт итоговых сумм заказа на основе его позиций"""
         items = self.items.all()
 
         self.subtotal = sum(item.total_price for item in items)
         self.bonus_discount = sum(item.bonus_discount for item in items)
         self.bonus_items_count = sum(item.bonus_quantity for item in items)
-        self.total_amount = self.subtotal - self.bonus_discount
+        self.bonus_points_earned = sum(item.bonus_points_earned for item in items)
+
+        # Учитываем стоимость доставки
+        self.total_amount = self.subtotal - self.bonus_discount + self.delivery_cost
         self.debt_amount = max(self.total_amount - self.payment_amount, Decimal('0'))
 
         self.save()
 
+    def confirm(self):
+        """Подтвердить заказ"""
+        if self.status == 'pending':
+            self.status = 'confirmed'
+            self.confirmed_date = timezone.now()
+            self.save()
+
     def complete(self):
-        """Завершить заказ, списать товары и создать долг, если необходимо."""
+        """Завершить заказ, списать товары и создать долг"""
         if self.status in ['pending', 'confirmed']:
             self.status = 'completed'
             self.completed_date = timezone.now()
@@ -225,10 +332,11 @@ class Order(models.Model):
             for item in self.items.all():
                 try:
                     inventory = self.store.inventory.get(product=item.product)
-                    inventory.quantity -= item.quantity
-                    inventory.save()
+                    if inventory.quantity >= item.quantity:
+                        inventory.quantity -= item.quantity
+                        inventory.save()
                 except ObjectDoesNotExist:
-                    # Ошибка: пытаемся продать товар, которого нет в инвентаре магазина
+                    # Товара нет в инвентаре магазина
                     pass
 
             # Создаём долг, если оплачено не всё
@@ -238,27 +346,101 @@ class Order(models.Model):
                     store=self.store,
                     amount=self.debt_amount,
                     order=self,
-                    description=f'Долг по заказу #{self.id}'
+                    description=f'Долг по заказу #{self.id}',
+                    due_date=timezone.now().date() + timezone.timedelta(days=30)
+                )
+
+            # Обновляем бонусную историю
+            self._update_bonus_history()
+
+    def cancel(self):
+        """Отменить заказ"""
+        if self.status in ['pending', 'confirmed']:
+            self.status = 'cancelled'
+            self.save()
+
+            # Возвращаем зарезервированные товары
+            for item in self.items.all():
+                item.product.release_quantity(item.quantity)
+
+    def _update_bonus_history(self):
+        """Обновление истории бонусов"""
+        from apps.bonuses.models import BonusHistory
+
+        for item in self.items.all():
+            if item.bonus_quantity > 0:
+                BonusHistory.objects.create(
+                    store=self.store,
+                    product=item.product,
+                    order=self,
+                    bonus_items=item.bonus_quantity,
+                    total_items_purchased=item.quantity + item.bonus_quantity
                 )
 
 
 class OrderItem(models.Model):
-    """Позиция в заказе клиента."""
+    """Позиция в заказе клиента"""
 
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items', verbose_name='Заказ')
-    product = models.ForeignKey('products.Product', on_delete=models.CASCADE, verbose_name='Товар')
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='items',
+        verbose_name='Заказ'
+    )
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        verbose_name='Товар'
+    )
 
+    # Количества
     quantity = models.DecimalField(
-        max_digits=8, decimal_places=3,
+        max_digits=10,
+        decimal_places=3,
         validators=[MinValueValidator(Decimal('0.001'))],
         verbose_name='Количество'
     )
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name='Цена за единицу')
-    total_price = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Общая стоимость')
+    bonus_quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Бонусное количество'
+    )
 
-    # Бонусная система
-    bonus_quantity = models.DecimalField(max_digits=8, decimal_places=3, default=0, verbose_name='Бонусное количество')
-    bonus_discount = models.DecimalField(max_digits=12, decimal_places=2, default=0, verbose_name='Бонусная скидка')
+    # Цены на момент заказа
+    unit_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='Цена за единицу'
+    )
+    total_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Общая стоимость'
+    )
+    bonus_discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name='Скидка за бонусные товары'
+    )
+
+    # Бонусы
+    bonus_points_earned = models.PositiveIntegerField(
+        default=0,
+        verbose_name='Заработано бонусных очков'
+    )
+
+    # Себестоимость (для расчёта прибыли)
+    cost_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name='Себестоимость за единицу'
+    )
 
     class Meta:
         db_table = 'order_items'
@@ -270,159 +452,103 @@ class OrderItem(models.Model):
         return f"{self.product.name} x {self.quantity}"
 
     def save(self, *args, **kwargs):
-        # Если цена не указана, берём текущую цену товара
-        if self.unit_price is None:
-            self.unit_price = self.product.price
+        """Автоматический расчёт полей при сохранении"""
+        # Рассчитываем общую стоимость
+        self.total_price = self.quantity * self.unit_price
 
-        self.total_price = self.unit_price * self.quantity
+        # Рассчитываем скидку за бонусные товары
+        self.bonus_discount = self.bonus_quantity * self.unit_price
+
+        # Рассчитываем бонусные очки
+        if self.product.is_bonus_eligible:
+            self.bonus_points_earned = int(self.quantity) * self.product.bonus_points
+
+        # Берём текущую себестоимость товара
+        if not self.cost_price:
+            self.cost_price = self.product.cost_price
+
         super().save(*args, **kwargs)
 
-    def calculate_bonus_discount(self):
-        """Расчёт бонусной скидки (например, каждый 21-й товар бесплатно)."""
-        from apps.bonuses.models import BonusCalculation
+    @property
+    def profit_amount(self):
+        """Прибыль с позиции"""
+        return (self.unit_price - self.cost_price) * self.quantity
 
-        # Получаем историю покупок этого товара в данном магазине
-        previous_quantity = OrderItem.objects.filter(
-            order__store=self.order.store,
-            product=self.product,
-            order__status='completed'
-        ).exclude(pk=self.pk).aggregate(
-            total=models.Sum('quantity')
-        )['total'] or Decimal('0')
-
-        calculator = BonusCalculation()
-        bonus_info = calculator.calculate_bonus(
-            previous_quantity=previous_quantity,
-            current_quantity=self.quantity,
-            unit_price=self.unit_price
-        )
-
-        self.bonus_quantity = bonus_info['bonus_quantity']
-        self.bonus_discount = bonus_info['bonus_discount']
-        self.save()
+    @property
+    def total_quantity(self):
+        """Общее количество (купленное + бонусное)"""
+        return self.quantity + self.bonus_quantity
 
 
-# --- Запросы товаров партнёрами у администратора ---
+# --- Корзина (временное хранение) ---
 
-class ProductRequest(models.Model):
-    """Запрос товаров партнёром у администратора."""
-    STATUS_CHOICES = [
-        ('pending', 'Ожидает рассмотрения'),
-        ('approved', 'Одобрен'),
-        ('rejected', 'Отклонен'),
-        ('fulfilled', 'Выполнен'),  # Добавлен статус для физической передачи товара
-        ('cancelled', 'Отменен'),
-    ]
+class Cart(models.Model):
+    """Корзина магазина"""
 
-    partner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+    store = models.OneToOneField(
+        'stores.Store',
         on_delete=models.CASCADE,
-        related_name='product_requests',
-        limit_choices_to={'role': 'partner'},
-        verbose_name='Партнер'
+        related_name='cart',
+        verbose_name='Магазин'
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='Статус')
-
-    # Даты
-    requested_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата запроса')
-    processed_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата обработки')
-    fulfilled_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата выполнения')
-
-    # Комментарии
-    partner_notes = models.TextField(blank=True, verbose_name='Комментарий партнера')
-    admin_notes = models.TextField(blank=True, verbose_name='Комментарий администратора')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создана')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлена')
 
     class Meta:
-        db_table = 'product_requests'
-        verbose_name = 'Запрос товаров'
-        verbose_name_plural = 'Запросы товаров'
-        ordering = ['-requested_at']
+        db_table = 'carts'
+        verbose_name = 'Корзина'
+        verbose_name_plural = 'Корзины'
 
     def __str__(self):
-        return f"Запрос #{self.id} от {self.partner.get_full_name()}"
+        return f"Корзина {self.store.store_name}"
 
-    def approve(self):
-        """Одобрить запрос администратором."""
-        if self.status == 'pending':
-            self.status = 'approved'
-            self.processed_at = timezone.now()
-            self.save()
+    @property
+    def total_amount(self):
+        """Общая сумма корзины"""
+        return sum(item.total_price for item in self.items.all())
 
-    def reject(self, reason=""):
-        """Отклонить запрос администратором."""
-        if self.status == 'pending':
-            self.status = 'rejected'
-            self.processed_at = timezone.now()
-            if reason:
-                self.admin_notes = reason
-            self.save()
+    @property
+    def items_count(self):
+        """Количество позиций в корзине"""
+        return self.items.count()
 
-    def fulfill(self):
-        """Выполнить запрос - передать товары партнёру."""
-        if self.status == 'approved':
-            self.status = 'fulfilled'
-            self.fulfilled_at = timezone.now()
-            self.save()
-
-            # Переносим товары от админа к партнёру
-            for item in self.items.all():
-                quantity_to_transfer = item.approved_quantity or item.requested_quantity
-
-                # Списываем с главного склада (если он есть)
-                # Предполагается, что у продукта есть связь с инвентарём админа,
-                # например, `product.admin_inventory`
-                try:
-                    admin_inventory = item.product.admin_inventory
-                    admin_inventory.quantity -= quantity_to_transfer
-                    admin_inventory.save()
-                except (AttributeError, ObjectDoesNotExist):
-                    # Продукт не связан с инвентарём админа
-                    pass
-
-                # Добавляем на склад партнёра
-                partner_inventory, created = self.partner.partner_inventory.get_or_create(
-                    product=item.product,
-                    defaults={'quantity': Decimal('0')}
-                )
-                partner_inventory.quantity += quantity_to_transfer
-                partner_inventory.save()
+    def clear(self):
+        """Очистить корзину"""
+        self.items.all().delete()
 
 
-class ProductRequestItem(models.Model):
-    """Позиция в запросе товаров."""
+class CartItem(models.Model):
+    """Позиция в корзине"""
 
-    request = models.ForeignKey(
-        ProductRequest,
+    cart = models.ForeignKey(
+        Cart,
         on_delete=models.CASCADE,
         related_name='items',
-        verbose_name='Запрос'
+        verbose_name='Корзина'
     )
     product = models.ForeignKey(
         'products.Product',
         on_delete=models.CASCADE,
         verbose_name='Товар'
     )
-    requested_quantity = models.DecimalField(
-        max_digits=8,
+    quantity = models.DecimalField(
+        max_digits=10,
         decimal_places=3,
         validators=[MinValueValidator(Decimal('0.001'))],
-        verbose_name='Запрашиваемое количество'
+        verbose_name='Количество'
     )
-    # Администратор может одобрить другое количество
-    approved_quantity = models.DecimalField(
-        max_digits=8,
-        decimal_places=3,
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Одобренное количество'
-    )
+    added_at = models.DateTimeField(auto_now_add=True, verbose_name='Добавлен')
 
     class Meta:
-        db_table = 'product_request_items'
-        verbose_name = 'Позиция запроса товаров'
-        verbose_name_plural = 'Позиции запросов товаров'
-        unique_together = ['request', 'product']
+        db_table = 'cart_items'
+        verbose_name = 'Позиция корзины'
+        verbose_name_plural = 'Позиции корзины'
+        unique_together = ['cart', 'product']
 
     def __str__(self):
-        return f"{self.product.name} x {self.requested_quantity}"
+        return f"{self.product.name} x {self.quantity}"
+
+    @property
+    def total_price(self):
+        """Общая стоимость позиции"""
+        return self.quantity * self.product.price

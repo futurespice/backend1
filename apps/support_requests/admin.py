@@ -1,24 +1,22 @@
 from django.contrib import admin
-from .models import SupportTicket, SupportMessage, FAQ, SupportCategory
+from .models import SupportRequest, SupportResponse, SupportCategory
 
-@admin.register(SupportTicket)
-class SupportTicketAdmin(admin.ModelAdmin):
-    list_display = ['ticket_number', 'title', 'category', 'priority', 'status', 'requester', 'created_at']
-    list_filter = ['category', 'priority', 'status', 'created_at']
-    search_fields = ['ticket_number', 'title', 'requester__name']
+@admin.register(SupportRequest)
+class SupportRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'subject', 'user', 'category', 'status', 'priority', 'created_at']
+    list_filter = ['status', 'priority', 'category', 'created_at']
+    search_fields = ['subject', 'description', 'user__name']
+    readonly_fields = ['created_at', 'updated_at', 'resolved_at', 'closed_at']
 
-@admin.register(SupportMessage)
-class SupportMessageAdmin(admin.ModelAdmin):
-    list_display = ['ticket', 'sender', 'message_type', 'is_internal', 'created_at']
-    list_filter = ['message_type', 'is_internal', 'created_at']
-
-@admin.register(FAQ)
-class FAQAdmin(admin.ModelAdmin):
-    list_display = ['question', 'category', 'view_count', 'helpful_count', 'is_published']
-    list_filter = ['category', 'is_published']
-    search_fields = ['question', 'answer']
+@admin.register(SupportResponse)
+class SupportResponseAdmin(admin.ModelAdmin):
+    list_display = ['request', 'author', 'is_internal', 'created_at']
+    list_filter = ['is_internal', 'created_at']
+    search_fields = ['message', 'request__subject']
+    readonly_fields = ['created_at']
 
 @admin.register(SupportCategory)
 class SupportCategoryAdmin(admin.ModelAdmin):
-    list_display = ['name', 'parent', 'ticket_count', 'is_active', 'order']
+    list_display = ['name', 'is_active', 'sort_order']  # Убрали parent, ticket_count, order
     list_filter = ['is_active']
+    search_fields = ['name', 'description']

@@ -1,75 +1,67 @@
 from django.contrib import admin
-from .models import Category, Product, ProductImage
-
+from .models import Category, Product, ProductImage, ProductCharacteristic
 
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
     extra = 1
-    fields = ['image', 'alt_text', 'is_primary', 'order']
+    fields = ['image', 'title', 'sort_order']
 
+class ProductCharacteristicInline(admin.TabularInline):
+    model = ProductCharacteristic
+    extra = 1
+    fields = ['name', 'value', 'unit', 'sort_order']
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ['name', 'parent', 'is_active', 'created_at']
-    list_filter = ['is_active', 'created_at']
+    list_display = ['name', 'parent', 'is_active', 'sort_order', 'created_at']
+    list_filter = ['is_active', 'parent']
     search_fields = ['name', 'description']
-    list_editable = ['is_active']
-    ordering = ['name']
-
-    fieldsets = (
-        ('Основная информация', {
-            'fields': ('name', 'description', 'parent')
-        }),
-        ('Изображение', {
-            'fields': ('image',)
-        }),
-        ('Статус', {
-            'fields': ('is_active',)
-        }),
-    )
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('parent')
-
+    ordering = ['sort_order', 'name']
+    prepopulated_fields = {'slug': ('name',)}
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'sku', 'category', 'price', 'unit',
-        'stock_quantity', 'is_available', 'is_active'
+        'name', 'article', 'category', 'price', 'stock_quantity',
+        'is_active', 'is_available', 'created_at'
     ]
-    list_filter = ['category', 'unit', 'is_available', 'is_active', 'created_at']
-    search_fields = ['name', 'sku', 'description']
-    list_editable = ['price', 'is_available', 'is_active']
+    list_filter = ['is_active', 'is_available', 'category', 'unit']
+    search_fields = ['name', 'description', 'article']
     ordering = ['name']
-    inlines = [ProductImageInline]
+    inlines = [ProductImageInline, ProductCharacteristicInline]
+    prepopulated_fields = {'slug': ('name',)}
 
     fieldsets = (
         ('Основная информация', {
-            'fields': ('name', 'description', 'category', 'sku')
+            'fields': ('name', 'description', 'article', 'slug', 'category')
         }),
-        ('Цена и единицы', {
-            'fields': ('price', 'unit', 'min_order_quantity')
+        ('Цены', {
+            'fields': ('price', 'cost_price', 'unit')
         }),
-        ('Складские остатки', {
+        ('Остатки', {
             'fields': ('stock_quantity', 'low_stock_threshold')
         }),
-        ('Статус', {
-            'fields': ('is_available', 'is_active')
+        ('Бонусы', {
+            'fields': ('is_bonus_eligible', 'bonus_points')
+        }),
+        ('Изображения', {
+            'fields': ('main_image',)
+        }),
+        ('Характеристики', {
+            'fields': ('weight', 'volume')
+        }),
+        ('Статусы', {
+            'fields': ('is_active', 'is_available')
+        }),
+        ('Производство', {
+            'fields': ('production_time_days', 'shelf_life_days')
         }),
     )
 
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('category')
-
+    readonly_fields = ['created_at', 'updated_at']
 
 @admin.register(ProductImage)
 class ProductImageAdmin(admin.ModelAdmin):
-    list_display = ['product', 'alt_text', 'is_primary', 'order', 'created_at']
-    list_filter = ['is_primary', 'created_at']
-    search_fields = ['product__name', 'alt_text']
-    list_editable = ['is_primary', 'order']
-    ordering = ['product', 'order']
-
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product')
+    list_display = ['product', 'title', 'sort_order']
+    list_filter = ['product']
+    ordering = ['product', 'sort_order']

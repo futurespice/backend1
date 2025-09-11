@@ -5,13 +5,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 from django.db.models import Sum, Count, Q
 from datetime import datetime
-
-from .models import BonusRule, BonusHistory, BonusCalculation
+from rest_framework import serializers
+from .models import BonusRule, BonusHistory, BonusCalculator  # ИСПРАВЛЕНО: BonusCalculator вместо BonusCalculation
 from .serializers import (
     BonusRuleSerializer, BonusHistorySerializer,
     BonusCalculationSerializer, BonusAnalyticsSerializer
 )
-from users.permissions import IsAdminUser
+from apps.users.permissions import IsAdminUser
 
 
 class BonusRuleViewSet(viewsets.ModelViewSet):
@@ -43,14 +43,14 @@ class BonusHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet для истории бонусов (только чтение)"""
 
     queryset = BonusHistory.objects.select_related(
-        'store', 'store__user', 'product', 'order'
+        'store', 'product', 'order'
     )
     serializer_class = BonusHistorySerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['store', 'product', 'order']
     search_fields = ['store__store_name', 'product__name']
-    ordering_fields = ['created_at', 'bonus_discount']
+    ordering_fields = ['created_at', 'discount_amount']
     ordering = ['-created_at']
 
     def get_queryset(self):
@@ -66,55 +66,42 @@ class BonusHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
         return qs
 
-    @action(detail=False, methods=['get'])
-    def summary(self, request):
-        """Сводка по бонусам"""
-        qs = self.get_queryset()
 
-        # Фильтры
-        store_id = request.query_params.get('store')
-        if store_id:
-            qs = qs.filter(store_id=store_id)
+class BonusBalanceViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet для баланса бонусов (только чтение)"""
 
-        date_from = request.query_params.get('date_from')
-        if date_from:
-            try:
-                date_from = datetime.strptime(date_from, '%Y-%m-%d').date()
-                qs = qs.filter(created_at__date__gte=date_from)
-            except ValueError:
-                pass
+    from .models import BonusBalance
+    from .serializers import BonusBalanceSerializer
 
-        date_to = request.query_params.get('date_to')
-        if date_to:
-            try:
-                date_to = datetime.strptime(date_to, '%Y-%m-%d').date()
-                qs = qs.filter(created_at__date__lte=date_to)
-            except ValueError:
-                pass
+    queryset = BonusBalance.objects.select_related('store', 'store__user')
+    serializer_class = BonusBalanceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['store']
 
-        # Агрегация
-        summary = qs.aggregate(
-            total_bonus_discount=Sum('bonus_discount'),
-            total_bonus_quantity=Sum('bonus_quantity'),
-            total_records=Count('id')
-        )
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
 
-        return Response({
-            'total_bonus_discount': summary['total_bonus_discount'] or 0,
-            'total_bonus_quantity': summary['total_bonus_quantity'] or 0,
-            'total_records': summary['total_records'] or 0
-        })
+        if user.role == 'store':
+            # Магазин видит только свой баланс
+            qs = qs.filter(store__user=user)
+        elif user.role == 'partner':
+            # Партнёр видит балансы своих магазинов
+            qs = qs.filter(store__partner=user)
+
+        return qs
 
 
 class BonusCalculationView(generics.GenericAPIView):
-    """Расчёт бонусов для товаров"""
+    """Расчёт бонусов для корзины товаров"""
 
     serializer_class = BonusCalculationSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
         """
-        Рассчитать бонусы для товаров
+        Рассчитать бонусы для корзины товаров
 
         Request data:
         {
@@ -132,10 +119,6 @@ class BonusCalculationView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Валидация данных
-        serializer = self.get_serializer(data=items, many=True)
-        serializer.is_valid(raise_exception=True)
-
         # Получаем магазин
         try:
             store = request.user.store_profile
@@ -147,35 +130,46 @@ class BonusCalculationView(generics.GenericAPIView):
 
         from apps.products.models import Product
 
-        calculator = BonusCalculation()
         results = []
         total_bonus_discount = 0
 
-        for item in serializer.validated_data:
+        for item in items:
             try:
                 product = Product.objects.get(id=item['product_id'])
-                quantity = item['quantity']
+                quantity = float(item['quantity'])
 
-                bonus_info = calculator.preview_bonus(store, product, quantity)
+                # Используем BonusCalculator для расчёта
+                bonuses = BonusCalculator.calculate_order_bonuses(
+                    [{
+                        'product': product,
+                        'quantity': quantity,
+                        'unit_price': product.price
+                    }],
+                    store
+                )
+
+                bonus_discount = bonuses.get('discount_amount', 0)
+                bonus_items = bonuses.get('bonus_items', 0)
 
                 result = {
                     'product_id': product.id,
                     'product_name': product.name,
                     'quantity': quantity,
-                    'unit_price': product.price,
-                    'bonus_quantity': bonus_info['bonus_quantity'],
-                    'bonus_discount': bonus_info['bonus_discount'],
-                    'new_cumulative': bonus_info['new_cumulative']
+                    'unit_price': float(product.price),
+                    'bonus_quantity': bonus_items,
+                    'bonus_discount': float(bonus_discount)
                 }
                 results.append(result)
-                total_bonus_discount += bonus_info['bonus_discount']
+                total_bonus_discount += bonus_discount
 
             except Product.DoesNotExist:
+                continue
+            except (ValueError, KeyError):
                 continue
 
         return Response({
             'items': results,
-            'total_bonus_discount': total_bonus_discount
+            'total_bonus_discount': float(total_bonus_discount)
         })
 
 
@@ -195,66 +189,69 @@ class BonusAnalyticsView(generics.GenericAPIView):
         - date_from: Дата начала (YYYY-MM-DD)
         - date_to: Дата окончания (YYYY-MM-DD)
         """
-        serializer = self.get_serializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
+        user = self.request.user
 
-        qs = BonusHistory.objects.all()
-        user = request.user
+        # Базовая фильтрация по ролям
+        history_qs = BonusHistory.objects.all()
 
-        # Фильтрация по правам доступа
         if user.role == 'store':
-            qs = qs.filter(store__user=user)
+            history_qs = history_qs.filter(store__user=user)
         elif user.role == 'partner':
-            qs = qs.filter(store__partner=user)
+            history_qs = history_qs.filter(store__partner=user)
 
-        # Применяем фильтры
-        filters = serializer.validated_data
+        # Фильтры из query params
+        store_id = request.query_params.get('store_id')
+        product_id = request.query_params.get('product_id')
+        date_from = request.query_params.get('date_from')
+        date_to = request.query_params.get('date_to')
 
-        if filters.get('store_id'):
-            qs = qs.filter(store_id=filters['store_id'])
+        if store_id:
+            history_qs = history_qs.filter(store_id=store_id)
+        if product_id:
+            history_qs = history_qs.filter(product_id=product_id)
+        if date_from:
+            history_qs = history_qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            history_qs = history_qs.filter(created_at__date__lte=date_to)
 
-        if filters.get('product_id'):
-            qs = qs.filter(product_id=filters['product_id'])
-
-        if filters.get('date_from'):
-            qs = qs.filter(created_at__date__gte=filters['date_from'])
-
-        if filters.get('date_to'):
-            qs = qs.filter(created_at__date__lte=filters['date_to'])
-
-        # Общая статистика
-        total_stats = qs.aggregate(
-            total_bonus_discount=Sum('bonus_discount'),
-            total_bonus_quantity=Sum('bonus_quantity'),
-            total_records=Count('id')
+        # Агрегированная статистика
+        stats = history_qs.aggregate(
+            total_bonus_items=Sum('bonus_items'),
+            total_discount=Sum('discount_amount'),
+            total_orders=Count('order', distinct=True),
+            total_products=Count('product', distinct=True)
         )
 
-        # Статистика по товарам
-        product_stats = qs.values(
+        # Топ товары по бонусам
+        top_products = history_qs.values(
             'product__name', 'product_id'
         ).annotate(
-            bonus_discount=Sum('bonus_discount'),
-            bonus_quantity=Sum('bonus_quantity'),
-            records_count=Count('id')
-        ).order_by('-bonus_discount')[:10]
+            bonus_count=Sum('bonus_items'),
+            discount_amount=Sum('discount_amount')
+        ).order_by('-bonus_count')[:5]
 
-        # Статистика по магазинам (только для админов и партнёров)
-        store_stats = []
+        # Топ магазины по бонусам (только для админов и партнёров)
+        top_stores = []
         if user.role in ['admin', 'partner']:
-            store_stats = qs.values(
+            store_filter = history_qs
+            if user.role == 'partner':
+                store_filter = store_filter.filter(store__partner=user)
+
+            top_stores = store_filter.values(
                 'store__store_name', 'store_id'
             ).annotate(
-                bonus_discount=Sum('bonus_discount'),
-                bonus_quantity=Sum('bonus_quantity'),
-                records_count=Count('id')
-            ).order_by('-bonus_discount')[:10]
+                bonus_count=Sum('bonus_items'),
+                discount_amount=Sum('discount_amount')
+            ).order_by('-bonus_count')[:5]
 
-        return Response({
-            'total_stats': {
-                'total_bonus_discount': total_stats['total_bonus_discount'] or 0,
-                'total_bonus_quantity': total_stats['total_bonus_quantity'] or 0,
-                'total_records': total_stats['total_records'] or 0
-            },
-            'top_products': list(product_stats),
-            'top_stores': list(store_stats)
-        })
+        analytics_data = {
+            'total_bonus_items': stats['total_bonus_items'] or 0,
+            'total_discount': float(stats['total_discount'] or 0),
+            'total_orders_with_bonus': stats['total_orders'] or 0,
+            'total_products_with_bonus': stats['total_products'] or 0,
+            'top_products': list(top_products),
+            'top_stores': list(top_stores)
+        }
+
+        serializer = BonusAnalyticsSerializer(analytics_data)
+        return Response(serializer.data)

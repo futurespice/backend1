@@ -1,430 +1,148 @@
-# cost_accounting/serializers.py
 from rest_framework import serializers
 from .models import (
     Expense, ProductExpense, DailyExpenseLog, ProductionBatch,
     MonthlyOverheadBudget, BillOfMaterial, BOMLine
 )
-from products.models import Product
-from decimal import Decimal
 
-# ---------- Basic Model Serializers ----------
 
 class ExpenseSerializer(serializers.ModelSerializer):
-    """Сериализатор для расходов"""
+    """Сериализатор расходов"""
 
     class Meta:
         model = Expense
         fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class ProductExpenseSerializer(serializers.ModelSerializer):
-    """Сериализатор для связей продуктов с расходами"""
+    """Сериализатор расходов на продукт"""
 
     product_name = serializers.CharField(source='product.name', read_only=True)
     expense_name = serializers.CharField(source='expense.name', read_only=True)
-    expense_type = serializers.CharField(source='expense.get_type_display', read_only=True)
 
     class Meta:
         model = ProductExpense
-        fields = [
-            'id', 'product', 'product_name', 'expense', 'expense_name', 'expense_type',
-            'ratio_per_product_unit', 'is_active', 'created_at']
-
+        fields = '__all__'
 
 
 class DailyExpenseLogSerializer(serializers.ModelSerializer):
-    """Сериализатор для дневных логов расходов"""
+    """Сериализатор ежедневных логов расходов"""
 
     expense_name = serializers.CharField(source='expense.name', read_only=True)
-    expense_type = serializers.CharField(source='expense.get_type_display', read_only=True)
 
     class Meta:
         model = DailyExpenseLog
-        fields = [
-            'id', 'expense', 'expense_name', 'expense_type', 'date',
-            'quantity_used', 'actual_price_per_unit', 'daily_amount', 'total_cost',
-            'created_at', 'updated_at'
-        ]
-
-    def validate(self, data):
-        """Автоматически рассчитываем total_cost"""
-        if data.get('quantity_used') and data.get('actual_price_per_unit'):
-            data['total_cost'] = data['quantity_used'] * data['actual_price_per_unit']
-        return data
+        fields = '__all__'
 
 
 class ProductionBatchSerializer(serializers.ModelSerializer):
-    """Сериализатор для производственных смен"""
+    """Сериализатор производственных партий"""
 
     product_name = serializers.CharField(source='product.name', read_only=True)
 
     class Meta:
         model = ProductionBatch
-        fields = [
-            'id', 'product', 'product_name', 'date', 'produced_quantity',
-            'suzerain_input_amount', 'physical_cost', 'overhead_cost', 'total_cost',
-            'cost_per_unit', 'revenue', 'net_profit', 'cost_breakdown',
-            'created_at', 'updated_at'
-        ]
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class MonthlyOverheadBudgetSerializer(serializers.ModelSerializer):
-    """Сериализатор для месячных бюджетов накладных расходов"""
-
-    expense_name = serializers.CharField(source='expense.name', read_only=True)
+    """Сериализатор месячных бюджетов накладных расходов"""
 
     class Meta:
         model = MonthlyOverheadBudget
-        fields = [
-            'id', 'expense', 'expense_name', 'year', 'month',
-            'planned_amount', 'actual_amount', 'created_at', 'updated_at'
-        ]
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
 
-
-# ---------- BOM Serializers ----------
 
 class BOMLineSerializer(serializers.ModelSerializer):
-    """Сериализатор для строки BOM (компонента)"""
+    """Сериализатор строк рецептуры"""
 
     expense_name = serializers.CharField(source='expense.name', read_only=True)
-    component_product_name = serializers.CharField(source='component_product.name', read_only=True)
+    expense_unit = serializers.CharField(source='expense.unit', read_only=True)
+    expense_price = serializers.DecimalField(source='expense.price_per_unit', max_digits=10, decimal_places=2,
+                                             read_only=True)
+    line_total_cost = serializers.SerializerMethodField()
 
     class Meta:
         model = BOMLine
-        fields = [
-            'id', 'expense', 'expense_name', 'component_product', 'component_product_name',
-            'quantity', 'unit', 'is_primary', 'order'
-        ]
+        fields = ['id', 'expense', 'expense_name', 'expense_unit', 'expense_price',
+                  'quantity', 'line_total_cost', 'notes']
 
-    def validate(self, data):
-        """Валидация: должен быть указан либо expense, либо component_product"""
-        expense = data.get('expense')
-        component_product = data.get('component_product')
-
-        if not expense and not component_product:
-            raise serializers.ValidationError(
-                "Должен быть указан либо расход (expense), либо компонент-продукт (component_product)"
-            )
-
-        if expense and component_product:
-            raise serializers.ValidationError(
-                "Нельзя указывать одновременно расход и продукт"
-            )
-
-        return data
+    def get_line_total_cost(self, obj):
+        """Расчёт стоимости строки"""
+        return float(obj.quantity * obj.expense.price_per_unit)
 
 
 class BOMSerializer(serializers.ModelSerializer):
-    """Сериализатор для спецификации состава (BOM)"""
+    """Сериализатор рецептур (Bill of Materials)"""
 
-    lines = BOMLineSerializer(many=True, read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
-    components_count = serializers.SerializerMethodField()
+    lines = BOMLineSerializer(many=True, read_only=True)
+    total_cost = serializers.SerializerMethodField()
+    cost_per_unit = serializers.SerializerMethodField()
 
     class Meta:
         model = BillOfMaterial
-        fields = [
-            'id', 'product', 'product_name', 'version', 'is_active',
-            'lines', 'components_count', 'created_at', 'updated_at'
-        ]
+        fields = ['id', 'name', 'description', 'product', 'product_name',
+                  'output_quantity', 'output_unit', 'is_active', 'lines',
+                  'total_cost', 'cost_per_unit', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
 
-    def get_components_count(self, obj) -> int:
-        """Количество компонентов в спецификации"""
-        return obj.lines.count()
+    def get_total_cost(self, obj):
+        """Общая стоимость рецептуры"""
+        return float(sum(line.quantity * line.expense.price_per_unit for line in obj.lines.all()))
 
-
-class BOMCreateUpdateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/обновления BOM с компонентами"""
-
-    lines = BOMLineSerializer(many=True)
-
-    class Meta:
-        model = BillOfMaterial
-        fields = ['product', 'version', 'is_active', 'lines']
-
-    def create(self, validated_data):
-        lines_data = validated_data.pop('lines')
-        bom = BillOfMaterial.objects.create(**validated_data)
-
-        for line_data in lines_data:
-            BOMLine.objects.create(bom=bom, **line_data)
-
-        return bom
-
-    def update(self, instance, validated_data):
-        lines_data = validated_data.pop('lines', None)
-
-        # Обновляем основные поля
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-
-        # Обновляем компоненты
-        if lines_data is not None:
-            instance.lines.all().delete()  # Удаляем старые
-            for line_data in lines_data:
-                BOMLine.objects.create(bom=instance, **line_data)
-
-        return instance
+    def get_cost_per_unit(self, obj):
+        """Себестоимость единицы продукции"""
+        total_cost = self.get_total_cost(obj)
+        if obj.output_quantity > 0:
+            return float(total_cost / obj.output_quantity)
+        return 0
 
 
-# ---------- Request/Response Serializers ----------
+class CostAnalyticsSerializer(serializers.Serializer):
+    """Сериализатор аналитики себестоимости"""
 
-class ProductRecipeTemplateSerializer(serializers.Serializer):
-    """Сериализатор для создания рецепта по шаблону"""
+    total_expenses = serializers.IntegerField()
+    total_products_with_cost = serializers.IntegerField()
+    total_batches = serializers.IntegerField()
+    expenses_by_type = serializers.ListField()
+    avg_production_cost = serializers.FloatField()
+    top_expenses = serializers.ListField()
+
+
+class BatchCostCalculationSerializer(serializers.Serializer):
+    """Сериализатор расчёта себестоимости партии"""
 
     product_id = serializers.IntegerField()
-    version = serializers.CharField(max_length=50, default="1.0")
-    components = serializers.ListField(
-        child=serializers.DictField(),
-        help_text="Список компонентов в формате: [{'type': 'product'|'expense', 'id': 1, 'quantity': 1.0, 'unit': 'шт', 'is_primary': false}]"
-    )
+    quantity = serializers.DecimalField(max_digits=10, decimal_places=3)
+    production_date = serializers.DateField()
+    notes = serializers.CharField(max_length=500, required=False)
 
     def validate_product_id(self, value):
-        """Проверяем существование продукта"""
+        """Проверяем существование товара"""
+        from apps.products.models import Product
         try:
             Product.objects.get(id=value)
-            return value
         except Product.DoesNotExist:
-            raise serializers.ValidationError(f"Продукт с ID {value} не найден")
-
-    def validate_components(self, value):
-        """Валидация компонентов"""
-        if not value:
-            raise serializers.ValidationError("Список компонентов не может быть пустым")
-
-        primary_count = 0
-
-        for component in value:
-            # Проверяем обязательные поля
-            required_fields = ['type', 'id', 'quantity']
-            for field in required_fields:
-                if field not in component:
-                    raise serializers.ValidationError(f"Поле '{field}' обязательно для каждого компонента")
-
-            # Проверяем тип
-            if component['type'] not in ['product', 'expense']:
-                raise serializers.ValidationError("Тип компонента должен быть 'product' или 'expense'")
-
-            # Проверяем количество
-            try:
-                quantity = float(component['quantity'])
-                if quantity <= 0:
-                    raise serializers.ValidationError("Количество должно быть больше 0")
-            except (ValueError, TypeError):
-                raise serializers.ValidationError("Количество должно быть числом")
-
-            # Считаем основные компоненты
-            if component.get('is_primary', False):
-                primary_count += 1
-
-            # Проверяем существование компонента
-            if component['type'] == 'product':
-                try:
-                    Product.objects.get(id=component['id'])
-                except Product.DoesNotExist:
-                    raise serializers.ValidationError(f"Продукт-компонент с ID {component['id']} не найден")
-            else:  # expense
-                try:
-                    Expense.objects.get(id=component['id'])
-                except Expense.DoesNotExist:
-                    raise serializers.ValidationError(f"Расход с ID {component['id']} не найден")
-
-        # Проверяем количество основных компонентов
-        if primary_count > 1:
-            raise serializers.ValidationError("Может быть только один основной компонент (Сюзерен)")
-
+            raise serializers.ValidationError("Товар не найден")
         return value
 
 
-class CostCalculationRequestSerializer(serializers.Serializer):
-    """Сериализатор для запроса расчета себестоимости"""
+class BonusAnalysisSerializer(serializers.Serializer):
+    """Сериализатор анализа влияния бонусов на себестоимость"""
 
-    date = serializers.DateField()
-    production_data = serializers.DictField(
-        child=serializers.DictField(),
-        help_text="Данные производства в формате: {'product_id': {'quantity': 1100, 'suzerain_input': 105}}"
-    )
-
-    def validate_production_data(self, value):
-        """Валидация данных производства"""
-        if not value:
-            raise serializers.ValidationError("Данные производства не могут быть пустыми")
-
-        for product_id, prod_data in value.items():
-            # Проверяем, что product_id - число
-            try:
-                int(product_id)
-            except ValueError:
-                raise serializers.ValidationError(f"ID продукта должен быть числом: {product_id}")
-
-            # Проверяем наличие хотя бы одного из полей
-            quantity = prod_data.get('quantity')
-            suzerain_input = prod_data.get('suzerain_input')
-
-            if not quantity and not suzerain_input:
-                raise serializers.ValidationError(
-                    f"Для продукта {product_id} должно быть указано 'quantity' или 'suzerain_input'"
-                )
-
-            # Валидируем числовые значения
-            if quantity is not None:
-                try:
-                    float_qty = float(quantity)
-                    if float_qty <= 0:
-                        raise serializers.ValidationError(f"Количество должно быть больше 0 для продукта {product_id}")
-                except (ValueError, TypeError):
-                    raise serializers.ValidationError(f"Количество должно быть числом для продукта {product_id}")
-
-            if suzerain_input is not None:
-                try:
-                    float_input = float(suzerain_input)
-                    if float_input <= 0:
-                        raise serializers.ValidationError(
-                            f"Ввод Сюзерена должен быть больше 0 для продукта {product_id}")
-                except (ValueError, TypeError):
-                    raise serializers.ValidationError(f"Ввод Сюзерена должен быть числом для продукта {product_id}")
-
-        return value
+    total_bonus_cost = serializers.FloatField()
+    bonus_percentage_of_revenue = serializers.FloatField()
+    products_affected = serializers.IntegerField()
+    average_bonus_per_order = serializers.FloatField()
+    recommendations = serializers.ListField(child=serializers.CharField())
 
 
-class CostBreakdownSerializer(serializers.Serializer):
-    """Сериализатор для разбивки себестоимости"""
+class QuickSetupSerializer(serializers.Serializer):
+    """Сериализатор быстрой настройки"""
 
-    product_id = serializers.IntegerField()
-    product_name = serializers.CharField()
-    date = serializers.DateField()
-    produced_quantity = serializers.DecimalField(max_digits=12, decimal_places=3)
-
-    # Детализация расходов
-    physical_costs = serializers.ListField(
-        child=serializers.DictField()
-    )
-    component_costs = serializers.ListField(
-        child=serializers.DictField()
-    )
-    overhead_costs = serializers.ListField(
-        child=serializers.DictField()
-    )
-
-    # Итоги
-    total_physical = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_components = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_overhead = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_cost = serializers.DecimalField(max_digits=12, decimal_places=2)
-    cost_per_unit = serializers.DecimalField(max_digits=12, decimal_places=4)
-
-
-# ---------- Bulk Operations Serializers ----------
-
-class BulkDailyExpenseSerializer(serializers.Serializer):
-    """Сериализатор для массового создания дневных расходов"""
-
-    date = serializers.DateField()
-    expenses = serializers.ListField(
-        child=serializers.DictField(),
-        help_text="Список расходов: [{'expense_id': 1, 'quantity_used': 10.5, 'actual_price': 25.0}]"
-    )
-
-    def validate_expenses(self, value):
-        """Валидация расходов"""
-        if not value:
-            raise serializers.ValidationError("Список расходов не может быть пустым")
-
-        for expense_data in value:
-            required_fields = ['expense_id', 'quantity_used']
-            for field in required_fields:
-                if field not in expense_data:
-                    raise serializers.ValidationError(f"Поле '{field}' обязательно")
-
-            # Проверяем существование расхода
-            try:
-                Expense.objects.get(id=expense_data['expense_id'])
-            except Expense.DoesNotExist:
-                raise serializers.ValidationError(f"Расход с ID {expense_data['expense_id']} не найден")
-
-        return value
-
-
-class MonthlyOverheadBulkSerializer(serializers.Serializer):
-    """Сериализатор для массового создания месячных бюджетов"""
-
-    year = serializers.IntegerField()
-    month = serializers.IntegerField(min_value=1, max_value=12)
-    budgets = serializers.ListField(
-        child=serializers.DictField(),
-        help_text="Список бюджетов: [{'expense_id': 1, 'planned_amount': 35000}]"
-    )
-
-    def validate_budgets(self, value):
-        """Валидация бюджетов"""
-        if not value:
-            raise serializers.ValidationError("Список бюджетов не может быть пустым")
-
-        for budget_data in value:
-            if 'expense_id' not in budget_data or 'planned_amount' not in budget_data:
-                raise serializers.ValidationError("Поля 'expense_id' и 'planned_amount' обязательны")
-
-            # Проверяем существование расхода
-            try:
-                expense = Expense.objects.get(id=budget_data['expense_id'])
-                if expense.type != Expense.ExpenseType.OVERHEAD:
-                    raise serializers.ValidationError(f"Расход {expense.name} не является накладным")
-            except Expense.DoesNotExist:
-                raise serializers.ValidationError(f"Расход с ID {budget_data['expense_id']} не найден")
-
-        return value
-
-
-# ---------- Utility Serializers ----------
-
-class DailyCostSummarySerializer(serializers.Serializer):
-    """Сериализатор для дневной сводки расходов"""
-
-    date = serializers.DateField()
-    physical_total = serializers.DecimalField(max_digits=12, decimal_places=2)
-    overhead_total = serializers.DecimalField(max_digits=12, decimal_places=2)
-    grand_total = serializers.DecimalField(max_digits=12, decimal_places=2)
-    expenses_count = serializers.IntegerField()
-
-
-class ExpensePriceUpdateSerializer(serializers.Serializer):
-    """Сериализатор для массового обновления цен расходов"""
-
-    expense_id = serializers.IntegerField()
-    new_price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
-
-    def validate_expense_id(self, value):
-        """Проверяем существование расхода"""
-        try:
-            Expense.objects.get(id=value)
-            return value
-        except Expense.DoesNotExist:
-            raise serializers.ValidationError(f"Расход с ID {value} не найден")
-
-
-class SuzerainProductSetupSerializer(serializers.Serializer):
-    """Сериализатор для настройки продукта с Сюзереном"""
-
-    product_id = serializers.IntegerField()
-    suzerain_expense_id = serializers.IntegerField()
-    ratio_per_unit = serializers.DecimalField(
-        max_digits=12, decimal_places=6, min_value=Decimal('0.000001'),
-        help_text="Количество Сюзерена на 1 единицу продукта"
-    )
-
-    def validate_product_id(self, value):
-        try:
-            Product.objects.get(id=value)
-            return value
-        except Product.DoesNotExist:
-            raise serializers.ValidationError(f"Продукт с ID {value} не найден")
-
-    def validate_suzerain_expense_id(self, value):
-        try:
-            expense = Expense.objects.get(id=value)
-            if expense.type != Expense.ExpenseType.PHYSICAL:
-                raise serializers.ValidationError("Сюзерен должен быть физическим расходом")
-            return value
-        except Expense.DoesNotExist:
-            raise serializers.ValidationError(f"Расход с ID {value} не найден")
+    create_default_expenses = serializers.BooleanField(default=True)
+    create_sample_bom = serializers.BooleanField(default=False)
+    setup_monthly_budgets = serializers.BooleanField(default=False)
