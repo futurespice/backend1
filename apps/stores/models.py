@@ -71,7 +71,7 @@ class Store(models.Model):
     def total_debt(self):
         """Общий долг магазина"""
         try:
-            from apps.debts.models import Debt
+            from debts.models import Debt
             total = Debt.objects.filter(
                 store=self,
                 is_paid=False

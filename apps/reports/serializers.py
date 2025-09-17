@@ -1,131 +1,174 @@
+from __future__ import annotations
+from typing import Any, Dict, Optional
+from datetime import date
+
+from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
-from .models import Report, SalesReport, InventoryReport
-from datetime import date, datetime
+
+from .models import (
+    Report,
+    SalesReport, InventoryReport, DebtReport,
+    BonusReport, BonusReportMonthly, CostReport
+)
+from .waste_models import WasteLog, WasteReport
+from . import services
 
 
-class ReportSerializer(serializers.ModelSerializer):
-    """Сериализатор отчетов"""
-
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    product_name = serializers.CharField(source='product.name', read_only=True)
-
-    class Meta:
-        model = Report
-        fields = [
-            'id', 'name', 'report_type', 'period',
-            'date_from', 'date_to', 'store', 'store_name',
-            'partner', 'partner_name', 'product', 'product_name',
-            'data', 'created_by', 'created_by_name',
-            'created_at', 'is_automated'
-        ]
-        read_only_fields = ['created_at', 'created_by']
-
+# ====== Базовые сериалайзеры витрин ======
 
 class SalesReportSerializer(serializers.ModelSerializer):
-    """Сериализатор отчетов по продажам"""
-
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    profit_margin = serializers.SerializerMethodField()
-
     class Meta:
         model = SalesReport
-        fields = [
-            'id', 'date', 'store', 'store_name', 'product', 'product_name',
-            'orders_count', 'total_quantity', 'total_revenue',
-            'total_bonus_discount', 'total_cost', 'profit', 'profit_margin',
-            'updated_at'
-        ]
-
-    def get_profit_margin(self, obj):
-        """Рассчитать маржу прибыли в процентах"""
-        if obj.total_revenue > 0:
-            return round((obj.profit / obj.total_revenue) * 100, 2)
-        return 0
+        fields = (
+            "id", "date", "partner", "store", "product",
+            "orders_count", "total_quantity",
+            "total_revenue", "total_bonus_discount",
+            "total_cost", "profit", "updated_at",
+        )
+        read_only_fields = fields
 
 
 class InventoryReportSerializer(serializers.ModelSerializer):
-    """Сериализатор отчетов по остаткам"""
-
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    turnover_ratio = serializers.SerializerMethodField()
-
     class Meta:
         model = InventoryReport
-        fields = [
-            'id', 'date', 'store', 'store_name', 'partner', 'partner_name',
-            'product', 'product_name', 'opening_balance', 'received_quantity',
-            'sold_quantity', 'closing_balance', 'opening_value',
-            'closing_value', 'turnover_ratio'
-        ]
-
-    def get_turnover_ratio(self, obj):
-        """Коэффициент оборачиваемости"""
-        avg_balance = (obj.opening_balance + obj.closing_balance) / 2
-        if avg_balance > 0:
-            return round(obj.sold_quantity / avg_balance, 2)
-        return 0
+        fields = (
+            "id", "date", "store", "partner", "product",
+            "opening_balance", "received_quantity", "sold_quantity", "closing_balance",
+            "opening_value", "closing_value",
+            "production_batch",
+        )
+        read_only_fields = fields
 
 
-class ReportGenerateSerializer(serializers.Serializer):
-    """Сериализатор для генерации отчетов"""
+class DebtReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DebtReport
+        fields = (
+            "id", "date", "partner", "store",
+            "opening_debt", "new_debt", "paid_debt", "closing_debt",
+            "updated_at",
+        )
+        read_only_fields = fields
 
+
+class BonusReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BonusReport
+        fields = (
+            "id", "date", "partner", "store", "product",
+            "sold_quantity", "bonus_quantity", "bonus_discount",
+            "net_revenue", "bonus_rule_n", "production_batch",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class BonusReportMonthlySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BonusReportMonthly
+        fields = (
+            "id", "year", "month", "partner", "store",
+            "total_bonus_discount", "total_bonus_items",
+            "days_with_bonuses", "avg_daily_bonus_discount", "avg_daily_bonus_items",
+            "meta", "updated_at",
+        )
+        read_only_fields = fields
+
+
+class CostReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CostReport
+        fields = (
+            "id", "date", "product", "production_batch",
+            "materials_cost", "overhead_cost", "total_cost", "produced_quantity",
+            "meta", "updated_at",
+        )
+        read_only_fields = fields
+
+
+class WasteLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WasteLog
+        fields = (
+            "id", "date", "partner", "store", "product",
+            "quantity", "amount", "reason", "notes",
+            "created_by", "created_at",
+        )
+        read_only_fields = ("id", "created_by", "created_at")
+
+    def create(self, validated_data: Dict[str, Any]) -> WasteLog:
+        user = self.context.get("request").user if self.context.get("request") else None
+        if user and not validated_data.get("created_by"):
+            validated_data["created_by"] = user
+        return super().create(validated_data)
+
+
+class WasteReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WasteReport
+        fields = (
+            "id", "date", "partner", "store", "product",
+            "waste_quantity", "waste_amount",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+# ====== Report (журнал) ======
+
+class ReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Report
+        fields = (
+            "id", "name", "report_type", "period",
+            "date_from", "date_to",
+            "store", "partner", "product",
+            "data",
+            "created_by", "created_at", "is_automated", "updated_at",
+        )
+        read_only_fields = ("id", "data", "created_by", "created_at", "updated_at")
+
+
+# ====== Генерация отчёта через services.generate_and_save_report ======
+
+class GenerateReportSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=200)
     report_type = serializers.ChoiceField(choices=Report.REPORT_TYPES)
     period = serializers.ChoiceField(choices=Report.PERIODS)
     date_from = serializers.DateField()
     date_to = serializers.DateField()
+    partner = serializers.PrimaryKeyRelatedField(queryset=Report._meta.get_field("partner").remote_field.model.objects.all(), required=False, allow_null=True)
+    store = serializers.PrimaryKeyRelatedField(queryset=Report._meta.get_field("store").remote_field.model.objects.all(), required=False, allow_null=True)
+    product = serializers.PrimaryKeyRelatedField(queryset=Report._meta.get_field("product").remote_field.model.objects.all(), required=False, allow_null=True)
+    is_automated = serializers.BooleanField(required=False, default=False)
 
-    # Опциональные фильтры
-    store_id = serializers.IntegerField(required=False)
-    partner_id = serializers.IntegerField(required=False)
-    product_id = serializers.IntegerField(required=False)
+    def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        d_from: date = attrs["date_from"]
+        d_to: date = attrs["date_to"]
+        period: str = attrs["period"]
+        if d_from > d_to:
+            raise serializers.ValidationError(_("date_from must be <= date_to"))
+        if period == "custom" and (not d_from or not d_to):
+            raise serializers.ValidationError(_("custom period requires both dates"))
+        return attrs
 
-    def validate(self, data):
-        """Валидация дат"""
-        if data['date_from'] > data['date_to']:
-            raise serializers.ValidationError("Дата начала не может быть больше даты окончания")
+    def create(self, validated_data: Dict[str, Any]) -> Report:
+        request = self.context.get("request")
+        user_id: Optional[int] = request.user.id if request and request.user and request.user.is_authenticated else None
 
-        # Проверяем что даты не в будущем
-        if data['date_to'] > date.today():
-            raise serializers.ValidationError("Дата окончания не может быть в будущем")
+        report = services.generate_and_save_report(
+            name=validated_data["name"],
+            report_type=validated_data["report_type"],
+            period=validated_data["period"],
+            date_from=validated_data["date_from"],
+            date_to=validated_data["date_to"],
+            created_by_id=user_id,
+            partner_id=validated_data.get("partner").id if validated_data.get("partner") else None,
+            store_id=validated_data.get("store").id if validated_data.get("store") else None,
+            product_id=validated_data.get("product").id if validated_data.get("product") else None,
+            is_automated=validated_data.get("is_automated", False),
+        )
+        return report
 
-        return data
-
-
-class ReportAnalyticsSerializer(serializers.Serializer):
-    """Сериализатор аналитики отчетов"""
-
-    # Фильтры
-    report_type = serializers.ChoiceField(choices=Report.REPORT_TYPES, required=False)
-    date_from = serializers.DateField(required=False)
-    date_to = serializers.DateField(required=False)
-    store_id = serializers.IntegerField(required=False)
-    partner_id = serializers.IntegerField(required=False)
-
-
-class DashboardSerializer(serializers.Serializer):
-    """Сериализатор дашборда"""
-
-    # Общая статистика
-    total_sales = serializers.DecimalField(max_digits=12, decimal_places=2)
-    total_orders = serializers.IntegerField()
-    total_profit = serializers.DecimalField(max_digits=12, decimal_places=2)
-    profit_margin = serializers.FloatField()
-
-    # Динамика по дням
-    daily_sales = serializers.ListField(child=serializers.DictField())
-
-    # Топы
-    top_products = serializers.ListField(child=serializers.DictField())
-    top_stores = serializers.ListField(child=serializers.DictField())
-
-    # Остатки
-    low_stock_products = serializers.ListField(child=serializers.DictField())
-
-    # Долги
-    total_debt = serializers.DecimalField(max_digits=12, decimal_places=2)
-    overdue_debt = serializers.DecimalField(max_digits=12, decimal_places=2)
+    def to_representation(self, instance: Report) -> Dict[str, Any]:
+        return ReportSerializer(instance).data

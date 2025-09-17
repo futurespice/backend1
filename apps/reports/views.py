@@ -1,328 +1,357 @@
-from rest_framework import viewsets, permissions, status, generics
-from rest_framework.response import Response
+from __future__ import annotations
+from typing import Optional
+
+from django.db.models import QuerySet
+from django.utils.dateparse import parse_date
+from rest_framework import viewsets, mixins, status
 from rest_framework.decorators import action
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters
-from django.db.models import Sum, Count, Avg, Q
-from datetime import datetime, date, timedelta
-from decimal import Decimal
-from django.db import models
-from .models import Report, SalesReport, InventoryReport
-from .serializers import (
-    ReportSerializer, SalesReportSerializer, InventoryReportSerializer,
-    ReportGenerateSerializer, ReportAnalyticsSerializer, DashboardSerializer
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.request import Request
+from rest_framework.response import Response
+
+from .models import (
+    Report,
+    SalesReport, InventoryReport, DebtReport,
+    BonusReport, BonusReportMonthly, CostReport
 )
-from .services import ReportGeneratorService
-from users.permissions import IsAdminUser, IsPartnerUser
+from .waste_models import WasteLog, WasteReport
+from .serializers import (
+    ReportSerializer, GenerateReportSerializer,
+    SalesReportSerializer, InventoryReportSerializer, DebtReportSerializer,
+    BonusReportSerializer, BonusReportMonthlySerializer, CostReportSerializer,
+    WasteLogSerializer, WasteReportSerializer,
+)
 
 
-class ReportViewSet(viewsets.ModelViewSet):
-    """ViewSet для отчетов"""
+# --------- helpers ---------
+def _int_or_none(value: Optional[str]) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "", "null") else None
+    except ValueError:
+        return None
 
-    queryset = Report.objects.select_related('created_by', 'store', 'partner', 'product')
+
+def _apply_common_filters(qs: QuerySet, request: Request, *, date_field: Optional[str] = None) -> QuerySet:
+    """
+    Общие фильтры запросов:
+    - Параметры: partner, store, product (ID).
+    - Диапазон дат: date_from, date_to (если указан date_field).
+    Пример: ?date_from=2025-09-01&date_to=2025-09-15&partner=12&store=3&product=55
+    """
+    partner = _int_or_none(request.query_params.get("partner"))
+    store = _int_or_none(request.query_params.get("store"))
+    product = _int_or_none(request.query_params.get("product"))
+
+    if partner is not None:
+        qs = qs.filter(partner_id=partner)
+    if store is not None:
+        qs = qs.filter(store_id=store)
+    if product is not None and hasattr(qs.model, "product_id"):
+        qs = qs.filter(product_id=product)
+
+    if date_field:
+        d_from = parse_date(request.query_params.get("date_from") or "")
+        d_to = parse_date(request.query_params.get("date_to") or "")
+        if d_from and d_to:
+            qs = qs.filter(**{f"{date_field}__range": (d_from, d_to)})
+        elif d_from:
+            qs = qs.filter(**{f"{date_field}__gte": d_from})
+        elif d_to:
+            qs = qs.filter(**{f"{date_field}__lte": d_to})
+
+    return qs
+
+
+# --------- Report journal ---------
+class ReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Журнал сформированных отчётов (витрина Report).
+
+    Эндпоинты:
+      • GET /api/reports/ — список отчётов с фильтрами.
+      • GET /api/reports/{id}/ — подробности конкретного отчёта (включая сохранённый JSON в поле data).
+      • POST /api/reports/generate/ — сгенерировать и сохранить новый отчёт в журнале.
+
+    Фильтры списка:
+      • report_type — тип отчёта (sales, inventory, debts, bonuses, costs, profit, partner_performance, store_performance, waste)
+      • period — период (daily, weekly, monthly, quarterly, yearly, custom)
+      • date_from, date_to — ограничение по датам отчёта
+      • partner, store, product — фильтры по объектам
+
+    Примеры:
+      • /api/reports/?report_type=waste&date_from=2025-09-01&date_to=2025-09-15
+      • /api/reports/?period=monthly&partner=7
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = Report.objects.all().select_related("store", "partner", "product", "created_by")
     serializer_class = ReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['report_type', 'period', 'store', 'partner', 'is_automated']
-    search_fields = ['name']
-    ordering_fields = ['created_at', 'date_from']
-    ordering = ['-created_at']
-
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdminUser()]
-        return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
         qs = super().get_queryset()
-        user = self.request.user
 
-        if user.role == 'store':
-            # Магазин видит только отчеты по себе
-            qs = qs.filter(store__user=user)
-        elif user.role == 'partner':
-            # Партнёр видит отчеты по своим магазинам
-            qs = qs.filter(Q(partner=user) | Q(store__partner=user))
+        rtype = self.request.query_params.get("report_type")
+        period = self.request.query_params.get("period")
+        if rtype:
+            qs = qs.filter(report_type=rtype)
+        if period:
+            qs = qs.filter(period=period)
+
+        d_from = parse_date(self.request.query_params.get("date_from") or "")
+        d_to = parse_date(self.request.query_params.get("date_to") or "")
+        if d_from and d_to:
+            qs = qs.filter(date_from__gte=d_from, date_to__lte=d_to)
+        elif d_from:
+            qs = qs.filter(date_to__gte=d_from)
+        elif d_to:
+            qs = qs.filter(date_from__lte=d_to)
+
+        partner = _int_or_none(self.request.query_params.get("partner"))
+        store = _int_or_none(self.request.query_params.get("store"))
+        product = _int_or_none(self.request.query_params.get("product"))
+        if partner is not None:
+            qs = qs.filter(partner_id=partner)
+        if store is not None:
+            qs = qs.filter(store_id=store)
+        if product is not None:
+            qs = qs.filter(product_id=product)
 
         return qs
 
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+    @action(detail=False, methods=["post"], url_path="generate")
+    def generate(self, request: Request) -> Response:
+        """
+        Сгенерировать отчёт и сохранить его в журнал.
+
+        Тело запроса (JSON):
+          - name (str) — название отчёта
+          - report_type (str) — тип (см. Report.REPORT_TYPES)
+          - period (str) — период (см. Report.PERIODS)
+          - date_from (date), date_to (date)
+          - partner (id, опц.), store (id, опц.), product (id, опц.)
+          - is_automated (bool, опц.)
+
+        Ответ: объект Report (включая поле data с рассчитанными агрегатами).
+        """
+        ser = GenerateReportSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        report = ser.save()
+        return Response(ReportSerializer(report).data, status=status.HTTP_201_CREATED)
 
 
+# --------- Waste (лог + дневная витрина) ---------
+class WasteLogViewSet(mixins.CreateModelMixin,
+                      mixins.ListModelMixin,
+                      mixins.RetrieveModelMixin,
+                      viewsets.GenericViewSet):
+    """
+    Логи брака (первичка списаний).
+
+    Эндпоинты:
+      • GET  /api/reports/waste-logs/         — список инцидентов брака с фильтрами.
+      • POST /api/reports/waste-logs/         — создать запись о браке (кол-во, сумма, причина).
+      • GET  /api/reports/waste-logs/{id}/    — подробности инцидента.
+
+    Фильтры списка:
+      • date_from, date_to — даты инцидентов
+      • partner, store, product — по объектам
+
+    Пример:
+      • /api/reports/waste-logs/?store=3&date_from=2025-09-01&date_to=2025-09-10
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = WasteLog.objects.all().select_related("store", "partner", "product", "created_by")
+    serializer_class = WasteLogSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _apply_common_filters(qs, self.request, date_field="date")
+
+
+class WasteReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Дневные агрегированные отчёты по браку (витрина по дням).
+
+    Эндпоинты:
+      • GET /api/reports/waste/           — список дневных агрегатов по браку.
+      • GET /api/reports/waste/{id}/      — детали конкретной записи.
+
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store, product — по объектам
+
+    Пример:
+      • /api/reports/waste/?partner=12&date_from=2025-09-01&date_to=2025-09-15
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = WasteReport.objects.all().select_related("store", "partner", "product")
+    serializer_class = WasteReportSerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _apply_common_filters(qs, self.request, date_field="date")
+
+
+# --------- Sales ---------
 class SalesReportViewSet(viewsets.ReadOnlyModelViewSet):
-    """ViewSet для отчетов по продажам"""
+    """
+    Отчёты по продажам за день (количество заказов, объём продаж, выручка, бонусы, себестоимость, прибыль).
 
-    queryset = SalesReport.objects.select_related('store', 'product')
+    Эндпоинты:
+      • GET /api/reports/sales/           — список дневных отчётов по продажам.
+      • GET /api/reports/sales/{id}/      — детали записи.
+
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store, product — по объектам
+
+    Пример:
+      • /api/reports/sales/?store=5&date_from=2025-09-01&date_to=2025-09-07
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = SalesReport.objects.all().select_related("store", "partner", "product")
     serializer_class = SalesReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['date', 'store', 'product']
-    ordering_fields = ['date', 'total_revenue', 'profit']
-    ordering = ['-date']
 
     def get_queryset(self):
         qs = super().get_queryset()
-        user = self.request.user
-
-        if user.role == 'store':
-            qs = qs.filter(store__user=user)
-        elif user.role == 'partner':
-            qs = qs.filter(store__partner=user)
-
-        return qs
-
-    @action(detail=False, methods=['get'])
-    def summary(self, request):
-        """Сводка по продажам"""
-        qs = self.get_queryset()
-
-        # Фильтры
-        date_from = request.query_params.get('date_from')
-        date_to = request.query_params.get('date_to')
-
-        if date_from:
-            qs = qs.filter(date__gte=date_from)
-        if date_to:
-            qs = qs.filter(date__lte=date_to)
-
-        summary = qs.aggregate(
-            total_revenue=Sum('total_revenue'),
-            total_orders=Sum('orders_count'),
-            total_quantity=Sum('total_quantity'),
-            total_profit=Sum('profit'),
-            avg_order_value=Avg('total_revenue')
-        )
-
-        return Response(summary)
+        return _apply_common_filters(qs, self.request, date_field="date")
 
 
+# --------- Inventory ---------
 class InventoryReportViewSet(viewsets.ReadOnlyModelViewSet):
-    """ViewSet для отчетов по остаткам"""
+    """
+    Отчёты по остаткам (на дату): начальный остаток, поступления, продажи, конечный остаток и их стоимость.
 
-    queryset = InventoryReport.objects.select_related('store', 'partner', 'product')
+    Эндпоинты:
+      • GET /api/reports/inventory/           — список отчётов по остаткам.
+      • GET /api/reports/inventory/{id}/      — детали записи.
+
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store, product — по объектам
+
+    Пример:
+      • /api/reports/inventory/?product=101&date_from=2025-09-01&date_to=2025-09-30
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = InventoryReport.objects.all().select_related("store", "partner", "product", "production_batch")
     serializer_class = InventoryReportSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['date', 'store', 'partner', 'product']
-    ordering_fields = ['date', 'closing_balance']
-    ordering = ['-date']
 
     def get_queryset(self):
         qs = super().get_queryset()
-        user = self.request.user
+        return _apply_common_filters(qs, self.request, date_field="date")
 
-        if user.role == 'store':
-            qs = qs.filter(store__user=user)
-        elif user.role == 'partner':
-            qs = qs.filter(Q(partner=user) | Q(store__partner=user))
+
+# --------- Debts ---------
+class DebtReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Отчёты по долгам партнёров/магазинов на дату: открытый долг, начислено, погашено, долг на конец.
+
+    Эндпоинты:
+      • GET /api/reports/debts/           — список отчётов по долгам.
+      • GET /api/reports/debts/{id}/      — детали записи.
+
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store — по объектам
+
+    Пример:
+      • /api/reports/debts/?partner=7&date_from=2025-09-01&date_to=2025-09-15
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = DebtReport.objects.all().select_related("store", "partner")
+    serializer_class = DebtReportSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _apply_common_filters(qs, self.request, date_field="date")
+
+
+# --------- Bonuses (daily) ---------
+class BonusReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Ежедневные отчёты по бонусам (штучные товары): бесплатные единицы, сумма бонусной скидки, net-выручка.
+
+    Эндпоинты:
+      • GET /api/reports/bonuses/           — список дневных бонусных отчётов.
+      • GET /api/reports/bonuses/{id}/      — детали записи.
+
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store, product — по объектам
+
+    Пример:
+      • /api/reports/bonuses/?store=2&date_from=2025-09-01&date_to=2025-09-30
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = BonusReport.objects.all().select_related("store", "partner", "product", "production_batch")
+    serializer_class = BonusReportSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _apply_common_filters(qs, self.request, date_field="date")
+
+
+# --------- Bonuses (monthly) ---------
+class BonusReportMonthlyViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Месячная сводка по бонусам (агрегат на основе дневных отчётов).
+
+    Эндпоинты:
+      • GET /api/reports/bonuses-monthly/           — список месячных сводок.
+      • GET /api/reports/bonuses-monthly/{id}/      — детали записи.
+
+    Фильтры списка:
+      • year, month — период (например, ?year=2025&month=9)
+      • partner, store — по объектам (опционально)
+
+    Пример:
+      • /api/reports/bonuses-monthly/?year=2025&month=9&partner=7
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = BonusReportMonthly.objects.all().select_related("store", "partner")
+    serializer_class = BonusReportMonthlySerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        year = _int_or_none(self.request.query_params.get("year"))
+        month = _int_or_none(self.request.query_params.get("month"))
+        if year is not None:
+            qs = qs.filter(year=year)
+        if month is not None:
+            qs = qs.filter(month=month)
+
+        partner = _int_or_none(self.request.query_params.get("partner"))
+        store = _int_or_none(self.request.query_params.get("store"))
+        if partner is not None:
+            qs = qs.filter(partner_id=partner)
+        if store is not None:
+            qs = qs.filter(store_id=store)
 
         return qs
 
 
-class GenerateReportView(generics.CreateAPIView):
-    """Генерация отчетов"""
+# --------- Cost ---------
+class CostReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Отчёты по себестоимости продукции (на дату): материалы, накладные, итоговая себестоимость, объём выпуска.
 
-    serializer_class = ReportGenerateSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    Эндпоинты:
+      • GET /api/reports/costs/           — список отчётов по себестоимости.
+      • GET /api/reports/costs/{id}/      — детали записи (включая привязку к производственной партии).
 
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+    Фильтры списка:
+      • date_from, date_to — диапазон дат
+      • partner, store, product — по объектам (partner/store используются в связке с товарами/складами)
 
-        # Генерируем отчет
-        generator = ReportGeneratorService()
-        report = generator.generate_report(
-            report_type=serializer.validated_data['report_type'],
-            period=serializer.validated_data['period'],
-            date_from=serializer.validated_data['date_from'],
-            date_to=serializer.validated_data['date_to'],
-            created_by=request.user,
-            filters=serializer.validated_data
-        )
+    Пример:
+      • /api/reports/costs/?product=42&date_from=2025-09-01&date_to=2025-09-10
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = CostReport.objects.all().select_related("product", "production_batch")
+    serializer_class = CostReportSerializer
 
-        response_serializer = ReportSerializer(report)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-
-
-class ReportAnalyticsView(generics.GenericAPIView):
-    """Аналитика отчетов"""
-
-    serializer_class = ReportAnalyticsSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request):
-        serializer = self.get_serializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
-
-        filters = serializer.validated_data
-        user = request.user
-
-        # Базовые QuerySet'ы с учетом прав доступа
-        sales_qs = SalesReport.objects.all()
-        inventory_qs = InventoryReport.objects.all()
-
-        if user.role == 'store':
-            sales_qs = sales_qs.filter(store__user=user)
-            inventory_qs = inventory_qs.filter(store__user=user)
-        elif user.role == 'partner':
-            sales_qs = sales_qs.filter(store__partner=user)
-            inventory_qs = inventory_qs.filter(Q(partner=user) | Q(store__partner=user))
-
-        # Применяем фильтры
-        if filters.get('date_from'):
-            sales_qs = sales_qs.filter(date__gte=filters['date_from'])
-            inventory_qs = inventory_qs.filter(date__gte=filters['date_from'])
-
-        if filters.get('date_to'):
-            sales_qs = sales_qs.filter(date__lte=filters['date_to'])
-            inventory_qs = inventory_qs.filter(date__lte=filters['date_to'])
-
-        if filters.get('store_id'):
-            sales_qs = sales_qs.filter(store_id=filters['store_id'])
-            inventory_qs = inventory_qs.filter(store_id=filters['store_id'])
-
-        # Аналитика продаж
-        sales_analytics = sales_qs.aggregate(
-            total_revenue=Sum('total_revenue'),
-            total_orders=Sum('orders_count'),
-            total_profit=Sum('profit'),
-            avg_order_value=Avg('total_revenue')
-        )
-
-        # Топ товары
-        top_products = sales_qs.values(
-            'product__name', 'product_id'
-        ).annotate(
-            revenue=Sum('total_revenue'),
-            quantity=Sum('total_quantity')
-        ).order_by('-revenue')[:10]
-
-        # Топ магазины (для админов и партнёров)
-        top_stores = []
-        if user.role in ['admin', 'partner']:
-            top_stores = sales_qs.values(
-                'store__store_name', 'store_id'
-            ).annotate(
-                revenue=Sum('total_revenue'),
-                orders=Sum('orders_count')
-            ).order_by('-revenue')[:10]
-
-        # Динамика по дням (последние 30 дней)
-        end_date = date.today()
-        start_date = end_date - timedelta(days=30)
-
-        daily_sales = sales_qs.filter(
-            date__gte=start_date,
-            date__lte=end_date
-        ).values('date').annotate(
-            revenue=Sum('total_revenue'),
-            orders=Sum('orders_count')
-        ).order_by('date')
-
-        return Response({
-            'sales_analytics': sales_analytics,
-            'top_products': list(top_products),
-            'top_stores': list(top_stores),
-            'daily_sales': list(daily_sales),
-            'period': {
-                'from': filters.get('date_from'),
-                'to': filters.get('date_to')
-            }
-        })
-
-
-class DashboardView(generics.GenericAPIView):
-    """Дашборд с основными метриками"""
-
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request):
-        user = request.user
-
-        # Период - последние 30 дней
-        end_date = date.today()
-        start_date = end_date - timedelta(days=30)
-
-        # Базовые QuerySet'ы
-        from apps.orders.models import Order
-        from apps.debts.models import Debt
-        from apps.stores.models import StoreInventory
-
-        orders_qs = Order.objects.filter(
-            order_date__date__gte=start_date,
-            status='completed'
-        )
-
-        if user.role == 'store':
-            orders_qs = orders_qs.filter(store__user=user)
-        elif user.role == 'partner':
-            orders_qs = orders_qs.filter(store__partner=user)
-
-        # Общая статистика
-        total_stats = orders_qs.aggregate(
-            total_sales=Sum('total_amount'),
-            total_orders=Count('id'),
-            avg_order_value=Avg('total_amount')
-        )
-
-        # Динамика по дням
-        daily_sales = orders_qs.extra(
-            select={'day': 'date(order_date)'}
-        ).values('day').annotate(
-            revenue=Sum('total_amount'),
-            orders=Count('id')
-        ).order_by('day')
-
-        # Топ товары
-        from apps.orders.models import OrderItem
-        top_products = OrderItem.objects.filter(
-            order__in=orders_qs
-        ).values(
-            'product__name', 'product_id'
-        ).annotate(
-            revenue=Sum('total_price'),
-            quantity=Sum('quantity')
-        ).order_by('-revenue')[:5]
-
-        # Низкие остатки
-        inventory_qs = StoreInventory.objects.select_related('product')
-        if user.role == 'store':
-            inventory_qs = inventory_qs.filter(store__user=user)
-        elif user.role == 'partner':
-            inventory_qs = inventory_qs.filter(store__partner=user)
-
-        low_stock = inventory_qs.filter(
-            quantity__lte=models.F('product__low_stock_threshold')
-        ).values(
-            'product__name', 'quantity', 'product__low_stock_threshold'
-        )[:10]
-
-        # Долги
-        debt_qs = Debt.objects.filter(is_paid=False)
-        if user.role == 'store':
-            debt_qs = debt_qs.filter(store__user=user)
-        elif user.role == 'partner':
-            debt_qs = debt_qs.filter(store__partner=user)
-
-        debt_stats = debt_qs.aggregate(
-            total_debt=Sum('amount') - Sum('paid_amount'),
-            overdue_debt=Sum('amount', filter=Q(due_date__lt=date.today())) - Sum('paid_amount',
-                                                                                  filter=Q(due_date__lt=date.today()))
-        )
-
-        dashboard_data = {
-            'total_sales': total_stats['total_sales'] or 0,
-            'total_orders': total_stats['total_orders'] or 0,
-            'total_profit': 0,  # Будет рассчитано позже
-            'profit_margin': 0,
-            'daily_sales': list(daily_sales),
-            'top_products': list(top_products),
-            'top_stores': [],
-            'low_stock_products': list(low_stock),
-            'total_debt': debt_stats['total_debt'] or 0,
-            'overdue_debt': debt_stats['overdue_debt'] or 0
-        }
-
-        serializer = DashboardSerializer(dashboard_data)
-        return Response(serializer.data)
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _apply_common_filters(qs, self.request, date_field="date")
