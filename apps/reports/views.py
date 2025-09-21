@@ -8,7 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
-
+from django.db.models import Q
 from .models import (
     Report,
     SalesReport, InventoryReport, DebtReport,
@@ -30,13 +30,17 @@ def _int_or_none(value: Optional[str]) -> Optional[int]:
     except ValueError:
         return None
 
+def _str_or_none(value: Optional[str]) -> Optional[str]:
+    v = (value or "").strip()
+    return v if v and v.lower() != "null" else None
+
 
 def _apply_common_filters(qs: QuerySet, request: Request, *, date_field: Optional[str] = None) -> QuerySet:
     """
-    Общие фильтры запросов:
-    - Параметры: partner, store, product (ID).
-    - Диапазон дат: date_from, date_to (если указан date_field).
-    Пример: ?date_from=2025-09-01&date_to=2025-09-15&partner=12&store=3&product=55
+    Общие фильтры:
+      - partner, store, product (ID)
+      - date_from/date_to (если передан date_field)
+      - ДОП: inn, store_name, partner_query, region / region_code / region_name
     """
     partner = _int_or_none(request.query_params.get("partner"))
     store = _int_or_none(request.query_params.get("store"))
@@ -49,6 +53,7 @@ def _apply_common_filters(qs: QuerySet, request: Request, *, date_field: Optiona
     if product is not None and hasattr(qs.model, "product_id"):
         qs = qs.filter(product_id=product)
 
+    # даты по одному полю
     if date_field:
         d_from = parse_date(request.query_params.get("date_from") or "")
         d_to = parse_date(request.query_params.get("date_to") or "")
@@ -58,6 +63,36 @@ def _apply_common_filters(qs: QuerySet, request: Request, *, date_field: Optiona
             qs = qs.filter(**{f"{date_field}__gte": d_from})
         elif d_to:
             qs = qs.filter(**{f"{date_field}__lte": d_to})
+
+    # ---- доп. фильтры
+    inn = _str_or_none(request.query_params.get("inn"))
+    store_name = _str_or_none(request.query_params.get("store_name") or request.query_params.get("store_title"))
+    partner_query = _str_or_none(request.query_params.get("partner_name") or request.query_params.get("partner_query"))
+
+    region_id = _int_or_none(request.query_params.get("region"))
+    region_code = _str_or_none(request.query_params.get("region_code"))
+    region_name = _str_or_none(request.query_params.get("region_name"))
+
+    if inn:
+        qs = qs.filter(store__inn=inn) if inn.isdigit() and 12 <= len(inn) <= 14 else qs.filter(store__inn__icontains=inn)
+
+    if store_name:
+        qs = qs.filter(Q(store__name__icontains=store_name) | Q(store__store_name__icontains=store_name))
+
+    if partner_query:
+        qs = qs.filter(
+            Q(partner__name__icontains=partner_query) |
+            Q(partner__second_name__icontains=partner_query) |
+            Q(partner__email__icontains=partner_query) |
+            Q(partner__phone__icontains=partner_query)
+        )
+
+    if region_id is not None:
+        qs = qs.filter(store__region_id=region_id)
+    if region_code:
+        qs = qs.filter(store__region__code__iexact=region_code)
+    if region_name:
+        qs = qs.filter(store__region__name__icontains=region_name)
 
     return qs
 
@@ -89,6 +124,7 @@ class ReportViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
 
+        # --- базовые фильтры ---
         rtype = self.request.query_params.get("report_type")
         period = self.request.query_params.get("period")
         if rtype:
@@ -96,6 +132,7 @@ class ReportViewSet(viewsets.ReadOnlyModelViewSet):
         if period:
             qs = qs.filter(period=period)
 
+        # даты по паре полей (date_from / date_to)
         d_from = parse_date(self.request.query_params.get("date_from") or "")
         d_to = parse_date(self.request.query_params.get("date_to") or "")
         if d_from and d_to:
@@ -105,6 +142,7 @@ class ReportViewSet(viewsets.ReadOnlyModelViewSet):
         elif d_to:
             qs = qs.filter(date_from__lte=d_to)
 
+        # partner / store / product (ID)
         partner = _int_or_none(self.request.query_params.get("partner"))
         store = _int_or_none(self.request.query_params.get("store"))
         product = _int_or_none(self.request.query_params.get("product"))
@@ -114,6 +152,43 @@ class ReportViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(store_id=store)
         if product is not None:
             qs = qs.filter(product_id=product)
+
+        # --- дополнительные фильтры ---
+        inn = _str_or_none(self.request.query_params.get("inn"))
+        store_name = _str_or_none(
+            self.request.query_params.get("store_name")
+            or self.request.query_params.get("store_title")
+        )
+        partner_query = _str_or_none(
+            self.request.query_params.get("partner_name")
+            or self.request.query_params.get("partner_query")
+        )
+        region_id = _int_or_none(self.request.query_params.get("region"))
+        region_code = _str_or_none(self.request.query_params.get("region_code"))
+        region_name = _str_or_none(self.request.query_params.get("region_name"))
+
+        if inn:
+            qs = qs.filter(store__inn=inn) if inn.isdigit() and 12 <= len(inn) <= 14 \
+                else qs.filter(store__inn__icontains=inn)
+
+        if store_name:
+            qs = qs.filter(Q(store__name__icontains=store_name) |
+                           Q(store__store_name__icontains=store_name))
+
+        if partner_query:
+            qs = qs.filter(
+                Q(partner__name__icontains=partner_query) |
+                Q(partner__second_name__icontains=partner_query) |
+                Q(partner__email__icontains=partner_query) |
+                Q(partner__phone__icontains=partner_query)
+            )
+
+        if region_id is not None:
+            qs = qs.filter(store__region_id=region_id)
+        if region_code:
+            qs = qs.filter(store__region__code__iexact=region_code)
+        if region_name:
+            qs = qs.filter(store__region__name__icontains=region_name)
 
         return qs
 

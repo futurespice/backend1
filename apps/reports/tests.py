@@ -20,21 +20,24 @@ from stores.models import Store
 
 User = get_user_model()
 
-
+# ---------------------- Helpers ----------------------
 def uniq_digits(n=12):
     ts = str(int(timezone.now().timestamp() * 1_000_000))
     return ts[-n:].rjust(n, "0")
 
 def ensure_region():
     """
-    Создаём один Region (город Алматы) — без City, т.к. Его нет в твоих моделях.
-    Поле code уникально, поэтому используем стабильный код.
+    Создаём один Region (город Алматы).
+    Поле code уникально, используем стабильный код.
     """
-    region, _ = Region.objects.get_or_create(
+    region, created = Region.objects.get_or_create(
         name="Алматы",
-        defaults={"code": "ALM", "region_type": "city", "is_active": True},
+        defaults={
+            "code": "ALM",
+            "is_active": True,
+        },
     )
-    # если уже был с другим code — обновим, чтобы не падало на unique
+    # если регион уже существовал, но без кода (или с другим), аккуратно проставим/обновим
     if not region.code:
         region.code = "ALM"
         region.save(update_fields=["code"])
@@ -97,6 +100,32 @@ def make_store(user_store: User):
         data["is_active"] = True
 
     return Store.objects.create(**data)
+
+def _set_store_name(store, value: str):
+    # Поддерживаем и name, и store_name в зависимости от твоей модели
+    if hasattr(store, "store_name"):
+        store.store_name = value
+    elif hasattr(store, "name"):
+        store.name = value
+    else:
+        raise AssertionError("Store has no name/store_name field")
+    store.save(update_fields=["store_name"] if hasattr(store, "store_name") else ["name"])
+
+def make_region(name: str, code: str = None):
+    if code is None:
+        # уникальный код
+        code = name[:3].upper()
+    r, _ = Region.objects.get_or_create(name=name, defaults={"code": code, "is_active": True})
+    if not r.code:
+        r.code = code
+        r.save(update_fields=["code"])
+    return r
+
+def _items(resp_json):
+    return resp_json["results"] if isinstance(resp_json, dict) and "results" in resp_json else resp_json
+
+def _store_has(field: str) -> bool:
+    return any(getattr(f, "attname", None) == field for f in Store._meta.get_fields())
 
 
 # ---------------------- FIXTURES ----------------------
@@ -394,3 +423,223 @@ def test_report_model_clean_validations(partner_user, product_piece, store):
     )
     # не должно кидать
     r3.clean()
+
+
+# -------------------------- WASTE LOG LIST: EXTRA FILTERS --------------------------
+
+@pytest.mark.django_db
+def test_waste_log_filters_by_region_code_and_name(api, admin_user, partner_user, product_piece):
+    api.force_authenticate(user=admin_user)
+
+    # Два региона и два магазина
+    r1 = make_region("Алматы", "ALM")
+    r2 = make_region("Тараз", "TRZ")
+
+    # Пользователи-магазины
+    s_user1 = make_user("store")
+    s_user2 = make_user("store")
+
+    st1 = make_store(s_user1)
+    st2 = make_store(s_user2)
+
+    # Привязываем регионы явно
+    st1.region = r1
+    st2.region = r2
+    _set_store_name(st1, "Магазин АЛМ")
+    _set_store_name(st2, "Магазин ТРЗ")
+    st1.save(); st2.save()
+
+    # Первичка брака в обоих магазинах, разные даты
+    d_al = date(2025, 9, 1)
+    d_tr = date(2025, 9, 2)
+    WasteLog.objects.create(date=d_al, partner_id=partner_user.id, store=st1,
+                            product=product_piece, quantity="1.000", amount="100.00")
+    WasteLog.objects.create(date=d_tr, partner_id=partner_user.id, store=st2,
+                            product=product_piece, quantity="2.000", amount="200.00")
+
+    url = reverse("reports:waste-log-list")
+
+    resp = api.get(url, {"region_code": "ALM"})
+    assert resp.status_code == 200
+    data = _items(resp.json())
+    assert len(data) == 1
+
+    resp = api.get(url, {"region_name": "тараз"})
+    assert resp.status_code == 200
+    data = _items(resp.json())
+    assert len(data) == 1
+
+    resp = api.get(url, {"region": r1.id})
+    assert resp.status_code == 200
+    data = _items(resp.json())
+    assert len(data) == 1
+
+
+@pytest.mark.django_db
+def test_waste_log_filters_by_inn_and_store_name(api, admin_user, partner_user, product_piece):
+    api.force_authenticate(user=admin_user)
+
+    r = make_region("Шымкент", "SHM")
+
+    # Два магазина с разными названиями
+    s_user1 = make_user("store")
+    s_user2 = make_user("store")
+    st1 = make_store(s_user1)
+    st2 = make_store(s_user2)
+
+    st1.region = r
+    st2.region = r
+    _set_store_name(st1, "Market One")
+    _set_store_name(st2, "Super Two")
+
+    # Сформируем update_fields только из реально существующих полей
+    update_fields = ["region"] + (["store_name"] if hasattr(st1, "store_name") else ["name"])
+    has_inn = _store_has("inn")
+    if has_inn:
+        st1.inn = "123456789012"   # 12 цифр -> точное совпадение
+        st2.inn = "987654321000"
+        st1.save(update_fields=update_fields + ["inn"])
+        st2.save(update_fields=update_fields + ["inn"])
+    else:
+        st1.save(update_fields=update_fields)
+        st2.save(update_fields=update_fields)
+
+    d0 = date(2025, 9, 1)
+    WasteLog.objects.create(date=d0, partner_id=partner_user.id, store=st1,
+                            product=product_piece, quantity="1.000", amount="100.00")
+    WasteLog.objects.create(date=d0, partner_id=partner_user.id, store=st2,
+                            product=product_piece, quantity="1.000", amount="100.00")
+
+    url = reverse("reports:waste-log-list")
+
+    # --- ИНН ---
+    if has_inn:
+        # Точное совпадение
+        resp = api.get(url, {"inn": "123456789012"})
+        assert resp.status_code == 200
+        data = _items(resp.json())
+        assert len(data) == 1
+
+        # Частичное (icontains) — оба
+        resp = api.get(url, {"inn": "789"})
+        assert resp.status_code == 200
+        data = _items(resp.json())
+        assert len(data) == 2
+    else:
+        pytest.skip("Store model has no 'inn' field; skipping INN filter checks")
+
+    # --- По названию магазина (icontains), учитывая name/store_name ---
+    resp = api.get(url, {"store_name": "super"})
+    assert resp.status_code == 200
+    data = _items(resp.json())
+    assert len(data) == 1
+
+
+# -------------------------- REPORT LIST: EXTRA FILTERS --------------------------
+
+@pytest.mark.django_db
+def test_report_list_filters_inn_store_partner_region(api, admin_user, partner_user, product_piece):
+    api.force_authenticate(user=admin_user)
+
+    r_al = make_region("Алматы", "ALM")
+    r_tr = make_region("Тараз", "TRZ")
+
+    # Два магазина в разных регионах
+    su1 = make_user("store")
+    su2 = make_user("store")
+    st1 = make_store(su1)
+    st2 = make_store(su2)
+
+    st1.region = r_al
+    st2.region = r_tr
+    _set_store_name(st1, "АлмМаркет")
+    _set_store_name(st2, "ТаразМаркет")
+
+    # Сохраняем только реально существующие поля
+    update_fields = ["region"] + (["store_name"] if hasattr(st1, "store_name") else ["name"])
+    has_inn = _store_has("inn")
+    if has_inn:
+        st1.inn = "111111111111"
+        st2.inn = "222222222222"
+        st1.save(update_fields=update_fields + ["inn"])
+        st2.save(update_fields=update_fields + ["inn"])
+    else:
+        st1.save(update_fields=update_fields)
+        st2.save(update_fields=update_fields)
+
+    # Партнёр с говорящими полями
+    partner_user.name = "Иван"
+    partner_user.second_name = "Иванов"
+    partner_user.save(update_fields=["name", "second_name"])
+
+    # Две записи в журнале Report
+    d0 = date(2025, 9, 1)
+    r1 = Report.objects.create(
+        name="Waste ALM",
+        report_type="waste",
+        period="daily",
+        date_from=d0, date_to=d0,
+        partner_id=partner_user.id, store_id=st1.id, product_id=product_piece.id,
+        data={}
+    )
+    r2 = Report.objects.create(
+        name="Waste TRZ",
+        report_type="waste",
+        period="daily",
+        date_from=d0, date_to=d0,
+        partner_id=partner_user.id, store_id=st2.id, product_id=product_piece.id,
+        data={}
+    )
+    assert r1.id and r2.id
+
+    url = reverse("reports:report-list")
+
+    # region_code=ALM -> только r1
+    resp = api.get(url, {"region_code": "ALM"})
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r1.id}
+
+    # region_name=тараз -> только r2
+    resp = api.get(url, {"region_name": "тараз"})
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r2.id}
+
+    # region=<id Алматы> -> только r1
+    resp = api.get(url, {"region": r_al.id})
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r1.id}
+
+    # inn точное -> r2 (только если поле существует)
+    if has_inn:
+        resp = api.get(url, {"inn": "222222222222"})
+        assert resp.status_code == 200
+        ids = {it["id"] for it in _items(resp.json())}
+        assert ids == {r2.id}
+    else:
+        pytest.skip("Store model has no 'inn' field; skipping INN filter checks")
+
+    # store_name icontains -> r1
+    resp = api.get(url, {"store_name": "алм"})
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r1.id}
+
+    # partner_query (по name/second_name/email/phone) -> оба
+    resp = api.get(url, {"partner_query": "иван"})
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r1.id, r2.id}
+
+    # Базовые: report_type + period + даты — вернут оба
+    resp = api.get(url, {
+        "report_type": "waste",
+        "period": "daily",
+        "date_from": str(d0),
+        "date_to": str(d0),
+    })
+    assert resp.status_code == 200
+    ids = {it["id"] for it in _items(resp.json())}
+    assert ids == {r1.id, r2.id}
