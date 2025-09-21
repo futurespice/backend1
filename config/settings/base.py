@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 from datetime import timedelta
 import sys
+import dj_database_url
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -31,6 +34,7 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'drf_spectacular',
     'celery',
+    'django_celery_beat',
 ]
 
 LOCAL_APPS = [
@@ -81,13 +85,23 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-# Database (будет переопределено в production для PostgreSQL)
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.parse(
+        os.environ.get('DATABASE_URL', 'postgres://baeil_app:12345678@db:5432/baielapp_2')
+    )
 }
+# Database (будет переопределено в production для PostgreSQL)
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'baielapp_2',
+#         'USER': 'baiel_app',
+#         'PASSWORD': '12345678',
+#         'HOST': 'localhost',  # Локальный хост вместо 'db'
+#         'PORT': '5432',
+#     }
+# }
 
 # Custom User Model
 AUTH_USER_MODEL = 'users.User'
