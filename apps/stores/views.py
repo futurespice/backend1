@@ -246,7 +246,7 @@ class StoreRequestViewSet(viewsets.ModelViewSet):
 class ProductCatalogView(generics.ListAPIView):
     """Каталог товаров для магазинов"""
 
-    queryset = Product.objects.filter(is_active=True, is_available=True).select_related('category')
+    queryset = Product.objects.filter(is_active=True).select_related('category')
     serializer_class = ProductCatalogSerializer
     permission_classes = [IsStoreUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]

@@ -1,33 +1,27 @@
 from django.contrib.auth.models import BaseUserManager
 from django.conf import settings
 
-# Маркер партнёра - можно вынести в settings
+# Маркер партнёра из настроек
 PARTNER_MARKER = getattr(settings, 'PARTNER_MARKER', 'p!8Rt')
 
 
 class UserManager(BaseUserManager):
-    """
-    Кастомный менеджер пользователей с логикой определения роли по маркеру
-    """
+    """Менеджер пользователей с логикой определения роли по маркеру"""
 
     def _extract_role_from_password(self, password):
-        """
-        Определяет роль пользователя по наличию маркера в пароле
-        """
+        """Определяет роль по наличию маркера в пароле"""
         if PARTNER_MARKER in password:
             return 'partner'
         return 'store'
 
     def _clean_password_from_marker(self, password):
-        """
-        Удаляет маркер из пароля перед сохранением
-        """
+        """Удаляет маркер из пароля перед сохранением"""
         return password.replace(PARTNER_MARKER, '')
 
-    def create_user(self, email, password=None, **extra_fields):
-        """
-        Создает обычного пользователя с автоматическим определением роли
-        """
+    def create_user(self, phone, email, password=None, **extra_fields):
+        """Создает пользователя с автоматическим определением роли"""
+        if not phone:
+            raise ValueError('Номер телефона обязателен')
         if not email:
             raise ValueError('Email обязателен')
         if not password:
@@ -45,24 +39,22 @@ class UserManager(BaseUserManager):
 
         # Партнёры требуют одобрения администратора
         if role == 'partner':
-            extra_fields.setdefault('is_approved', False)
+            extra_fields.setdefault('approval_status', 'pending')
         else:
-            extra_fields.setdefault('is_approved', True)
+            extra_fields.setdefault('approval_status', 'approved')
 
         # Создаем пользователя
-        user = self.model(email=email, **extra_fields)
+        user = self.model(phone=phone, email=email, **extra_fields)
         user.set_password(clean_password)
         user.save(using=self._db)
 
         return user
 
-    def create_superuser(self, email, password=None, **extra_fields):
-        """
-        Создает суперпользователя (администратора)
-        """
+    def create_superuser(self, phone, email, password=None, **extra_fields):
+        """Создает суперпользователя (администратора)"""
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
-        extra_fields.setdefault('is_approved', True)
+        extra_fields.setdefault('approval_status', 'approved')
         extra_fields.setdefault('role', 'admin')
 
         if extra_fields.get('is_staff') is not True:
@@ -71,16 +63,8 @@ class UserManager(BaseUserManager):
             raise ValueError('Суперпользователь должен иметь is_superuser=True')
 
         # Для суперпользователя не применяем логику маркеров
-        user = self.model(email=email, **extra_fields)
+        user = self.model(phone=phone, email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
 
         return user
-
-    def get_by_natural_key(self, username):
-        """
-        Позволяет аутентификацию по email, phone или username
-        """
-        return self.get(**{
-            self.model.USERNAME_FIELD + '__iexact': username
-        })

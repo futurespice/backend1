@@ -1,4 +1,4 @@
-# apps/regions/management/commands/create_test_data.py
+# apps/regions/management/commands/test_registration.py
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from regions.models import Region, City

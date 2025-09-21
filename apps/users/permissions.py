@@ -19,7 +19,8 @@ class IsPartnerUser(BasePermission):
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.role == 'partner'
+            request.user.role == 'partner' and
+            request.user.approval_status == 'approved'
         )
 
 
@@ -30,29 +31,8 @@ class IsStoreUser(BasePermission):
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.role == 'store'
-        )
-
-
-class IsPartnerOrAdmin(BasePermission):
-    """Разрешение для партнёров и администраторов"""
-
-    def has_permission(self, request, view):
-        return bool(
-            request.user and
-            request.user.is_authenticated and
-            request.user.role in ['partner', 'admin']
-        )
-
-
-class IsStoreOrPartner(BasePermission):
-    """Разрешение для магазинов и партнёров"""
-
-    def has_permission(self, request, view):
-        return bool(
-            request.user and
-            request.user.is_authenticated and
-            request.user.role in ['store', 'partner']
+            request.user.role == 'store' and
+            request.user.approval_status == 'approved'
         )
 
 
@@ -63,7 +43,7 @@ class IsApprovedUser(BasePermission):
         return bool(
             request.user and
             request.user.is_authenticated and
-            request.user.is_approved
+            request.user.approval_status == 'approved'
         )
 
 
@@ -90,88 +70,3 @@ class IsOwnerOrAdmin(BasePermission):
             return obj.partner == request.user
 
         return False
-
-
-class CanManageStore(BasePermission):
-    """Разрешение на управление магазином"""
-
-    def has_permission(self, request, view):
-        return bool(
-            request.user and
-            request.user.is_authenticated and
-            request.user.role in ['admin', 'partner', 'store']
-        )
-
-    def has_object_permission(self, request, view, obj):
-        if request.user.role == 'admin':
-            return True
-
-        # Партнёр может управлять своими магазинами
-        if request.user.role == 'partner':
-            return obj.partner == request.user
-
-        # Магазин может управлять только собой
-        if request.user.role == 'store':
-            return obj.user == request.user
-
-        return False
-
-
-class CanViewOrder(BasePermission):
-    """Разрешение на просмотр заказа"""
-
-    def has_permission(self, request, view):
-        return bool(
-            request.user and
-            request.user.is_authenticated
-        )
-
-    def has_object_permission(self, request, view, obj):
-        if request.user.role == 'admin':
-            return True
-
-        # Партнёр видит заказы своих магазинов
-        if request.user.role == 'partner':
-            return hasattr(obj, 'store') and obj.store.partner == request.user
-
-        # Магазин видит только свои заказы
-        if request.user.role == 'store':
-            return hasattr(obj, 'store') and obj.store.user == request.user
-
-        return False
-
-
-class CanManageDebt(BasePermission):
-    """Разрешение на управление долгами"""
-
-    def has_permission(self, request, view):
-        return bool(
-            request.user and
-            request.user.is_authenticated and
-            request.user.role in ['admin', 'partner']
-        )
-
-    def has_object_permission(self, request, view, obj):
-        if request.user.role == 'admin':
-            return True
-
-        # Партнёр может управлять долгами своих магазинов
-        if request.user.role == 'partner':
-            return obj.store.partner == request.user
-
-        return False
-
-
-class ReadOnlyOrAdmin(BasePermission):
-    """Только чтение для обычных пользователей, полный доступ для админов"""
-
-    def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-
-        # Админы имеют полный доступ
-        if request.user.role == 'admin':
-            return True
-
-        # Остальные только читать
-        return request.method in ['GET', 'HEAD', 'OPTIONS']

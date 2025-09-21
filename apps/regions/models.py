@@ -1,108 +1,76 @@
-from django.db import models
 import math
+from django.db import models
+from django.core.validators import MinValueValidator
+from decimal import Decimal
 
 
 class Region(models.Model):
-    """Модель регионов"""
+    """Регионы для группировки магазинов и маршрутов доставки"""
 
-    name = models.CharField(max_length=100, verbose_name='Название региона')
+    name = models.CharField(max_length=100, unique=True, verbose_name='Название региона')
     code = models.CharField(max_length=10, unique=True, verbose_name='Код региона')
+    description = models.TextField(blank=True, verbose_name='Описание')
+    is_active = models.BooleanField(default=True, verbose_name='Активен')
 
-    # Иерархия регионов (область -> район -> город)
-    parent = models.ForeignKey(
-        'self',
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name='children',
-        verbose_name='Родительский регион'
-    )
-
-    # Тип региона
-    REGION_TYPES = [
-        ('country', 'Страна'),
-        ('oblast', 'Область'),
-        ('district', 'Район'),
-        ('city', 'Город'),
-        ('village', 'Село'),
-    ]
-    region_type = models.CharField(
-        max_length=20,
-        choices=REGION_TYPES,
-        default='city',
-        verbose_name='Тип региона'
-    )
-
-    # GPS координаты центра региона
+    # Координаты для GPS и карт
     latitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
+        max_digits=10,
+        decimal_places=7,
+        null=True, blank=True,
         verbose_name='Широта'
     )
     longitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
+        max_digits=10,
+        decimal_places=7,
+        null=True, blank=True,
         verbose_name='Долгота'
     )
 
-    # Статус
-    is_active = models.BooleanField(default=True, verbose_name='Активен')
+    # Метаданные для маршрутизации
+    delivery_radius_km = models.PositiveIntegerField(
+        default=20,
+        verbose_name='Радиус доставки (км)'
+    )
+    delivery_cost = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Стоимость доставки'
+    )
 
-    # Метаданные
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
+    # Приоритет обслуживания
+    priority = models.PositiveIntegerField(
+        default=5,
+        verbose_name='Приоритет обслуживания (1-10)'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'regions'
         verbose_name = 'Регион'
         verbose_name_plural = 'Регионы'
-        ordering = ['name']
-        unique_together = ['name', 'parent']  # Уникальность в рамках родителя
+        ordering = ['priority', 'name']
 
     def __str__(self):
-        if self.parent:
-            return f"{self.name} ({self.parent.name})"
-        return self.name
+        return f"{self.name} ({self.code})"
 
     @property
-    def full_name(self):
-        """Полное имя региона с иерархией"""
-        parts = []
-        current = self
-        while current:
-            parts.append(current.name)
-            current = current.parent
-        return " > ".join(reversed(parts))
+    def stores_count(self):
+        """Количество магазинов в регионе"""
+        return self.stores.filter(is_active=True).count()
 
-    def get_all_children(self):
-        """Получить всех потомков рекурсивно"""
-        children = []
-        for child in self.children.all():
-            children.append(child)
-            children.extend(child.get_all_children())
-        return children
-
-    def get_ancestors(self):
-        """Получить всех предков"""
-        ancestors = []
-        current = self.parent
-        while current:
-            ancestors.append(current)
-            current = current.parent
-        return ancestors
-
-    def is_ancestor_of(self, region):
-        """Проверить является ли предком"""
-        current = region.parent
-        while current:
-            if current == self:
-                return True
-            current = current.parent
-        return False
+    @property
+    def active_orders_count(self):
+        """Количество активных заказов в регионе"""
+        return sum(
+            store.orders.filter(
+                status__in=['pending', 'confirmed', 'production', 'ready', 'delivering']
+            ).count()
+            for store in self.stores.filter(is_active=True)
+        )
 
 
 class DeliveryZone(models.Model):

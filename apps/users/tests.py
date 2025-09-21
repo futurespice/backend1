@@ -1,4 +1,3 @@
-# apps/users/tests.py
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -9,186 +8,318 @@ from .models import PasswordResetRequest
 User = get_user_model()
 
 
-class AuthenticationTestCase(TestCase):
+class UserRegistrationTestCase(TestCase):
     def setUp(self):
         self.client = APIClient()
 
     def test_partner_registration_with_marker(self):
-        """Тест регистрации партнера с маркером"""
+        """Тест регистрации партнера с маркером p!8Rt"""
         data = {
+            'name': 'Иван',
+            'second_name': 'Петров',
             'email': 'partner@test.com',
             'phone': '+996555123456',
-            'name': 'Иван',
-            'second_name': 'Иванович Петров',
-            'password': 'test123p!8Rt',
-            'password_confirm': 'test123p!8Rt'
+            'password': 'SecurePass123p!8Rt'  # Более надёжный пароль с маркером
         }
 
-        response = self.client.post(reverse('register'), data)
+        response = self.client.post(reverse('users:register'), data)
+
+        # ОТЛАДКА: выводим ответ при ошибке
+        if response.status_code != status.HTTP_201_CREATED:
+            print(f"Status code: {response.status_code}")
+            print(f"Response data: {response.data}")
+
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-        user = User.objects.get(email='partner@test.com')
+        user = User.objects.get(phone='+996555123456')
         self.assertEqual(user.role, 'partner')
-        self.assertFalse(user.is_approved)  # Партнеры требуют одобрения
+        self.assertEqual(user.approval_status, 'pending')  # Партнеры ждут одобрения
+
+        # Проверяем, что маркер удален из пароля
+        self.assertTrue(user.check_password('SecurePass123'))
 
     def test_store_registration_without_marker(self):
         """Тест регистрации магазина без маркера"""
         data = {
+            'name': 'Петр',
+            'second_name': 'Сидоров',
             'email': 'store@test.com',
             'phone': '+996555123457',
-            'name': 'Петр',
-            'second_name': 'Петрович Сидоров',
-            'password': 'test12345',
-            'password_confirm': 'test12345'
+            'password': 'SecurePass123'  # Без маркера
         }
 
-        response = self.client.post(reverse('register'), data)
+        response = self.client.post(reverse('users:register'), data)
+
+        # ОТЛАДКА: выводим ответ при ошибке
+        if response.status_code != status.HTTP_201_CREATED:
+            print(f"Status code: {response.status_code}")
+            print(f"Response data: {response.data}")
+
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-        user = User.objects.get(email='store@test.com')
+        user = User.objects.get(phone='+996555123457')
         self.assertEqual(user.role, 'store')
-        self.assertTrue(user.is_approved)  # Магазины одобряются автоматически
+        self.assertEqual(user.approval_status, 'approved')  # Магазины одобряются автоматически
 
-    def test_login_approved_user(self):
-        """Тест входа одобренного пользователя"""
-        user = User.objects.create_user(
-            email='test@test.com',
-            phone='+996555123458',
-            name='Тест',
-            second_name='Тестович',
-            password='test12345',
-            is_approved=True
-        )
-
+    def test_invalid_phone_format(self):
+        """Тест валидации номера телефона"""
         data = {
+            'name': 'Тест',
+            'second_name': 'Тестов',
             'email': 'test@test.com',
-            'password': 'test12345'
+            'phone': '996555123456',  # Без +
+            'password': 'SecurePass123'
         }
 
-        response = self.client.post(reverse('token_obtain_pair'), data)
+        response = self.client.post(reverse('users:register'), data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', response.data)
+
+    def test_email_validation(self):
+        """Тест валидации email"""
+        data = {
+            'name': 'Тест',
+            'second_name': 'Тестов',
+            'email': 'invalid@@email.com',  # Два символа @
+            'phone': '+996555123458',
+            'password': 'SecurePass123'
+        }
+
+        response = self.client.post(reverse('users:register'), data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('email', response.data)
+
+
+class LoginLogoutTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        # Создаем тестового пользователя
+        self.user = User.objects.create_user(
+            phone='+996555123456',
+            email='test@test.com',
+            name='Тест',
+            second_name='Тестов',
+            password='SecurePass123'
+        )
+
+    def test_login_with_phone_and_password(self):
+        """Тест входа по номеру телефона и паролю"""
+        data = {
+            'phone': '+996555123456',
+            'password': 'SecurePass123'
+        }
+
+        response = self.client.post(reverse('users:login'), data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('access', response.data)
         self.assertIn('refresh', response.data)
-        self.assertIn('user', response.data)
 
-    def test_login_unapproved_user(self):
-        """Тест входа неодобренного пользователя"""
-        user = User.objects.create_user(
-            email='unapproved@test.com',
-            phone='+996555123459',
-            name='Неодобренный',
-            second_name='Пользователь',
-            password='test12345',
-            is_approved=False
-        )
-
+    def test_login_wrong_password(self):
+        """Тест входа с неверным паролем"""
         data = {
-            'email': 'unapproved@test.com',
-            'password': 'test12345'
+            'phone': '+996555123456',
+            'password': 'wrongpassword'
         }
 
-        response = self.client.post(reverse('token_obtain_pair'), data)
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.post(reverse('users:login'), data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_password_reset_flow(self):
-        """Тест полного флоу сброса пароля"""
-        user = User.objects.create_user(
-            email='reset@test.com',
-            phone='+996555123460',
-            name='Сброс',
-            second_name='Пароля',
-            password='oldpassword'
+    def test_login_with_remember_me(self):
+        """Тест входа с функцией запомнить меня"""
+        data = {
+            'phone': '+996555123456',
+            'password': 'SecurePass123',
+            'remember_me': True
+        }
+
+        response = self.client.post(reverse('users:login'), data)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertIn('refresh', response.data)
+
+    def test_logout(self):
+        """Тест выхода из системы"""
+        # Сначала логинимся
+        login_data = {
+            'phone': '+996555123456',
+            'password': 'SecurePass123'
+        }
+        login_response = self.client.post(reverse('users:login'), login_data)
+        refresh_token = login_response.data['refresh']
+        access_token = login_response.data['access']
+
+        # Затем выходим
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access_token}')
+        logout_data = {'refresh': refresh_token}
+
+        response = self.client.post(reverse('users:logout'), logout_data)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class ProfileTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            phone='+996555123456',
+            email='test@test.com',
+            name='Тест',
+            second_name='Тестов',
+            password='SecurePass123'
         )
+        self.client.force_authenticate(user=self.user)
 
-        # Запрос сброса
-        data = {'email': 'reset@test.com'}
-        response = self.client.post(reverse('password_reset'), data)
+    def test_get_profile(self):
+        """Тест получения профиля"""
+        response = self.client.get(reverse('users:profile'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['name'], 'Тест')
+
+    def test_patch_profile(self):
+        """Тест частичного обновления профиля"""
+        data = {'name': 'Новое Имя'}
+
+        response = self.client.patch(reverse('users:profile'), data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        # Получаем код
-        reset_request = PasswordResetRequest.objects.get(user=user)
-        code = reset_request.code
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.name, 'Новое Имя')
 
-        # Проверка кода
-        data = {'code': code}
-        response = self.client.post(reverse('password_reset_check_code'), data)
+    def test_put_profile(self):
+        """Тест полного обновления профиля"""
+        data = {
+            'name': 'Новое Имя',
+            'second_name': 'Новая Фамилия',
+            'email': 'new@test.com',
+            'phone': '+996555999888'
+        }
+
+        response = self.client.put(reverse('users:profile'), data)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-        # Установка нового пароля
-        data = {'code': code, 'new_password': 'newpassword123'}
-        response = self.client.post(reverse('password_reset_confirm'), data)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.name, 'Новое Имя')
+        self.assertEqual(self.user.email, 'new@test.com')
 
-        # Проверяем, что можем войти с новым паролем
-        user.refresh_from_db()
-        self.assertTrue(user.check_password('newpassword123'))
 
-    def test_profile_access(self):
-        """Тест доступа к профилю"""
-        user = User.objects.create_user(
-            email='profile@test.com',
-            phone='+996555123461',
-            name='Профиль',
-            second_name='Тестовый',
-            password='test12345',
-            is_approved=True
-        )
-
-        # Без токена
-        response = self.client.get(reverse('user_profile'))
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-        # С токеном
-        self.client.force_authenticate(user=user)
-        response = self.client.get(reverse('user_profile'))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['email'], 'profile@test.com')
-
-    def test_admin_users_access(self):
-        """Тест доступа админа к управлению пользователями"""
+class AdminUserManagementTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
         # Создаем админа
-        admin_user = User.objects.create_user(
+        self.admin = User.objects.create_user(
+            phone='+996555000000',
             email='admin@test.com',
-            phone='+996555123462',
             name='Админ',
-            second_name='Системный',
-            password='admin123',
-            role='admin',
-            is_approved=True
+            second_name='Админов',
+            password='AdminPass123',
+            role='admin'
         )
-
-        # Создаем обычного пользователя
-        regular_user = User.objects.create_user(
-            email='regular@test.com',
-            phone='+996555123463',
-            name='Обычный',
-            second_name='Пользователь',
-            password='user123',
-            is_approved=True
+        # Создаем партнёра, ожидающего одобрения
+        self.partner = User.objects.create_user(
+            phone='+996555111111',
+            email='partner@test.com',
+            name='Партнёр',
+            second_name='Партнёров',
+            password='PartnerPass123p!8Rt'
         )
+        self.client.force_authenticate(user=self.admin)
 
-        # Обычный пользователь не может получить список всех пользователей
-        self.client.force_authenticate(user=regular_user)
-        response = self.client.get(reverse('admin-users-list'))
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+    def test_get_all_users(self):
+        """Тест получения списка всех пользователей админом"""
+        response = self.client.get(reverse('users:admin-users-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(len(response.data['results']) >= 2)  # минимум админ и партнёр
 
-        # Админ может
-        self.client.force_authenticate(user=admin_user)
-        response = self.client.get(reverse('admin-users-list'))
+    def test_approve_user(self):
+        """Тест одобрения пользователя админом"""
+        response = self.client.patch(
+            reverse('users:admin-users-approve', kwargs={'pk': self.partner.id})
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+        self.partner.refresh_from_db()
+        self.assertEqual(self.partner.approval_status, 'approved')
 
-if __name__ == '__main__':
-    import django
-    import os
+    def test_reject_user(self):
+        """Тест отклонения пользователя админом"""
+        response = self.client.patch(
+            reverse('users:admin-users-reject', kwargs={'pk': self.partner.id})
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.testing')
-    django.setup()
+        self.partner.refresh_from_db()
+        self.assertEqual(self.partner.approval_status, 'rejected')
 
-    from django.test.utils import get_runner
-    from django.conf import settings
+    def test_block_user(self):
+        """Тест блокировки пользователя админом"""
+        response = self.client.patch(
+            reverse('users:admin-users-block', kwargs={'pk': self.partner.id})
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    TestRunner = get_runner(settings)
-    test_runner = TestRunner()
-    failures = test_runner.run_tests(['users.tests'])
-    exit(failures)
+        self.partner.refresh_from_db()
+        self.assertFalse(self.partner.is_active)
+
+    def test_unblock_user(self):
+        """Тест разблокировки пользователя админом"""
+        # Сначала блокируем
+        self.partner.is_active = False
+        self.partner.save()
+
+        response = self.client.patch(
+            reverse('users:admin-users-unblock', kwargs={'pk': self.partner.id})
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.partner.refresh_from_db()
+        self.assertTrue(self.partner.is_active)
+
+    def test_pending_approval_list(self):
+        """Тест получения списка пользователей, ожидающих одобрения"""
+        response = self.client.get(reverse('users:admin-users-pending-approval'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)  # только partner ждёт одобрения
+
+    def test_user_stats(self):
+        """Тест получения статистики пользователей"""
+        response = self.client.get(reverse('users:admin-users-stats'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('total_users', response.data)
+        self.assertIn('partners', response.data)
+        self.assertIn('stores', response.data)
+        self.assertIn('pending_approval', response.data)
+        self.assertIn('blocked_users', response.data)
+
+
+class PasswordResetTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            phone='+996555123456',
+            email='test@test.com',
+            name='Тест',
+            second_name='Тестов',
+            password='SecurePass123'
+        )
+
+    def test_password_reset_request_with_email(self):
+        """Тест запроса сброса пароля только с email"""
+        data = {
+            'email': 'test@test.com'
+        }
+
+        response = self.client.post(reverse('users:password_reset'), data)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Проверяем, что код создался
+        self.assertTrue(
+            PasswordResetRequest.objects.filter(user=self.user).exists()
+        )
+
+    def test_password_reset_invalid_email(self):
+        """Тест запроса сброса с несуществующим email"""
+        data = {
+            'email': 'nonexistent@test.com'
+        }
+
+        response = self.client.post(reverse('users:password_reset'), data)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

@@ -1,15 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import RegionViewSet, DeliveryZoneViewSet, RegionListView
+from .views import RegionViewSet
 
 router = DefaultRouter()
-router.register(r'regions', RegionViewSet, basename='regions')
-router.register(r'delivery-zones', DeliveryZoneViewSet, basename='delivery-zones')
+router.register(r'regions', RegionViewSet)
+
+app_name = 'regions'
 
 urlpatterns = [
-    # Простой список регионов
-    path('list/', RegionListView.as_view(), name='region-list'),
-
-    # Роуты ViewSet'ов
     path('', include(router.urls)),
 ]

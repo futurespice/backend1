@@ -1,72 +1,70 @@
 from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.utils.html import format_html
+from django.contrib.auth.admin import UserAdmin
 from .models import User, PasswordResetRequest
 
 
 @admin.register(User)
-class UserAdmin(BaseUserAdmin):
-    list_display = (
-        'id', 'email', 'full_name', 'role', 'is_approved', 'is_active', 'is_staff', 'created_at', 'avatar_preview'
-    )
-    list_filter = ('role', 'is_approved', 'is_active', 'is_staff', 'created_at')
-    search_fields = ('email', 'name', 'second_name', 'phone')
-    ordering = ('-created_at',)
+class CustomUserAdmin(UserAdmin):
+    list_display = ['phone', 'email', 'name', 'second_name', 'role', 'approval_status', 'is_active', 'created_at']
+    list_filter = ['role', 'approval_status', 'is_active', 'created_at']
+    search_fields = ['phone', 'email', 'name', 'second_name']
+    ordering = ['-created_at']
 
     fieldsets = (
-        (None, {'fields': ('email', 'password')}),
-        ('Персональная информация', {'fields': ('name', 'second_name', 'phone', 'avatar')}),
-        ('Роль и права', {'fields': ('role', 'is_approved', 'is_active', 'is_staff', 'is_superuser')}),
-        ('Группы и права', {'fields': ('groups', 'user_permissions')}),
-        ('Важные даты', {'fields': ('last_login', 'created_at', 'updated_at')}),
+        (None, {'fields': ('phone', 'password')}),
+        ('Личная информация', {'fields': ('name', 'second_name', 'email', 'avatar')}),
+        ('Роль и права', {'fields': ('role', 'approval_status', 'is_active', 'is_staff', 'is_superuser')}),
+        ('Группы', {'fields': ('groups', 'user_permissions')}),
+        ('Даты', {'fields': ('last_login', 'created_at', 'updated_at')}),
     )
+
+    readonly_fields = ['created_at', 'updated_at']
 
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('email', 'name', 'second_name', 'phone', 'role', 'password1', 'password2', 'is_approved'),
+            'fields': ('phone', 'email', 'name', 'second_name', 'password1', 'password2', 'role'),
         }),
     )
 
-    readonly_fields = ('created_at', 'updated_at', 'last_login')
-
-    def full_name(self, obj):
-        return obj.full_name
-    full_name.short_description = "ФИО"
-
-    def avatar_preview(self, obj):
-        if obj.avatar:
-            return format_html('<img src="{}" width="50" height="50" style="border-radius: 50%;" />', obj.avatar.url)
-        return "Нет фото"
-    avatar_preview.short_description = "Аватар"
-
+    # Переопределяем actions для одобрения партнёров
     actions = ['approve_users', 'reject_users', 'block_users', 'unblock_users']
 
     def approve_users(self, request, queryset):
-        updated = queryset.update(is_approved=True)
-        self.message_user(request, f'{updated} пользователей одобрено.')
-    approve_users.short_description = "Одобрить выбранных пользователей"
+        """Массовое одобрение пользователей"""
+        updated = queryset.update(approval_status='approved')
+        self.message_user(request, f'Одобрено {updated} пользователей')
+
+    approve_users.short_description = 'Одобрить выбранных пользователей'
 
     def reject_users(self, request, queryset):
-        updated = queryset.update(is_approved=False)
-        self.message_user(request, f'{updated} пользователей отклонено.')
-    reject_users.short_description = "Отклонить выбранных пользователей"
+        """Массовое отклонение пользователей"""
+        updated = queryset.update(approval_status='rejected')
+        self.message_user(request, f'Отклонено {updated} пользователей')
+
+    reject_users.short_description = 'Отклонить выбранных пользователей'
 
     def block_users(self, request, queryset):
-        updated = queryset.update(is_active=False)
-        self.message_user(request, f'{updated} пользователей заблокировано.')
-    block_users.short_description = "Заблокировать выбранных пользователей"
+        """Массовая блокировка пользователей"""
+        updated = queryset.exclude(role='admin').update(is_active=False)
+        self.message_user(request, f'Заблокировано {updated} пользователей')
+
+    block_users.short_description = 'Заблокировать выбранных пользователей'
 
     def unblock_users(self, request, queryset):
+        """Массовая разблокировка пользователей"""
         updated = queryset.update(is_active=True)
-        self.message_user(request, f'{updated} пользователей разблокировано.')
-    unblock_users.short_description = "Разблокировать выбранных пользователей"
+        self.message_user(request, f'Разблокировано {updated} пользователей')
+
+    unblock_users.short_description = 'Разблокировать выбранных пользователей'
 
 
 @admin.register(PasswordResetRequest)
 class PasswordResetRequestAdmin(admin.ModelAdmin):
-    list_display = ('user', 'code', 'is_used', 'created_at', 'expires_at')
-    list_filter = ('is_used', 'created_at')
-    search_fields = ('user__email', 'code')
-    readonly_fields = ('user', 'code', 'created_at', 'expires_at')
-    ordering = ('-created_at',)
+    list_display = ['user', 'code', 'created_at', 'expires_at', 'is_used']
+    list_filter = ['is_used', 'created_at']
+    search_fields = ['user__email', 'user__phone', 'code']
+    readonly_fields = ['created_at']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('user')
