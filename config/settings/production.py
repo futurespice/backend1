@@ -1,10 +1,8 @@
-import os
-import dj_database_url
 from .base import *
 
 # Production settings
 DEBUG = False
-
+load_dotenv()
 ALLOWED_HOSTS = ['*']  # Настрой под свой домен
 
 # Database PostgreSQL

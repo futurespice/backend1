@@ -1,7 +1,7 @@
 from .base import *
 
 DEBUG = True
-
+load_dotenv()
 # Development-specific apps
 INSTALLED_APPS += [
     'django_extensions',  # pip install django-extensions
