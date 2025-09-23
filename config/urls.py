@@ -68,6 +68,7 @@ urlpatterns = [
     path('api/cost-accounting/', include('cost_accounting.urls')),
     path('api/reports/', include('reports.urls')),
     path('api/regions/', include('regions.urls')),
+    path('api/geo/', include("geo.urls")),
 
     # Дополнительные модули (когда будут готовы)
     # path('api/messaging/', include('apps.messaging.urls')),

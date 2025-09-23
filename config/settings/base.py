@@ -52,6 +52,7 @@ LOCAL_APPS = [
     'messaging',
     'tracking',
     'support_requests',
+    'geo',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
