@@ -6,11 +6,11 @@ load_dotenv()
 ALLOWED_HOSTS = ['*']  # Настрой под свой домен
 
 # Database PostgreSQL
-DATABASES = {
-    'default': dj_database_url.parse(
-        os.environ.get('DATABASE_URL', 'postgres://baeil_app:12345678@db:5432/baielapp_2')
-    )
-}
+# DATABASES = {
+#     'default': dj_database_url.parse(
+#         os.environ.get('DATABASE_URL', 'postgres://baeil_app:12345678@db:5432/baielapp_2')
+#     )
+# }
 
 # Security
 SECURE_BROWSER_XSS_FILTER = True

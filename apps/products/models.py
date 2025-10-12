@@ -1,346 +1,302 @@
 from django.db import models
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.exceptions import ValidationError
 from decimal import Decimal
-from django.utils.text import slugify
 
 
-class Category(models.Model):
-    """Категория товаров"""
+# ============= EXPENSES =============
 
-    name = models.CharField(max_length=200, verbose_name='Название')
-    description = models.TextField(blank=True, verbose_name='Описание')
-    slug = models.SlugField(max_length=200, unique=True, blank=True, verbose_name='Слаг')
-    parent = models.ForeignKey(
-        'self',
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name='children',
-        verbose_name='Родительская категория'
-    )
-    image = models.ImageField(
-        upload_to='categories/',
-        blank=True,
-        null=True,
-        verbose_name='Изображение'
-    )
-    is_active = models.BooleanField(default=True, verbose_name='Активна')
-    sort_order = models.PositiveIntegerField(default=0, verbose_name='Порядок сортировки')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
-
-    class Meta:
-        db_table = 'product_categories'
-        verbose_name = 'Категория'
-        verbose_name_plural = 'Категории'
-        ordering = ['sort_order', 'name']
-
-    def __str__(self):
-        return self.name
-
-    def save(self, *args, **kwargs):
-        if not self.slug:
-            self.slug = slugify(self.name, allow_unicode=True)
-        super().save(*args, **kwargs)
-
-    @property
-    def full_name(self):
-        """Полное имя категории с иерархией"""
-        parts = []
-        current = self
-        while current:
-            parts.append(current.name)
-            current = current.parent
-        return " > ".join(reversed(parts))
-
-    def get_all_children(self):
-        """Получить всех потомков рекурсивно"""
-        children = []
-        for child in self.children.all():
-            children.append(child)
-            children.extend(child.get_all_children())
-        return children
-
-    def get_products_count(self):
-        """Количество товаров в категории и подкатегориях"""
-        children_ids = [child.id for child in self.get_all_children()]
-        children_ids.append(self.id)
-        return Product.objects.filter(category_id__in=children_ids, is_active=True).count()
+class ExpenseType(models.TextChoices):
+    PHYSICAL = 'physical', 'Физические'
+    OVERHEAD = 'overhead', 'Накладные'
 
 
-class Product(models.Model):
-    """Модель товара"""
+class ExpenseStatus(models.TextChoices):
+    SUZERAIN = 'suzerain', 'Сюзерен'
+    VASSAL = 'vassal', 'Вассал'
+    CIVILIAN = 'civilian', 'Обыватель'
 
-    UNIT_CHOICES = [
-        ('kg', 'кг'),
-        ('g', 'г'),
-        ('l', 'л'),
-        ('ml', 'мл'),
-        ('pcs', 'шт'),
-        ('pack', 'упак'),
-        ('box', 'коробка'),
-        ('bag', 'мешок'),
-    ]
 
-    # Основная информация
-    name = models.CharField(max_length=200, verbose_name='Название товара')
-    description = models.TextField(blank=True, verbose_name='Описание')
-    article = models.CharField(max_length=50, unique=True, blank=True, verbose_name='Артикул')
-    slug = models.SlugField(max_length=200, unique=True, blank=True, verbose_name='Слаг')
+class ExpenseState(models.TextChoices):
+    MECHANICAL = 'mechanical', 'Механическое'
+    AUTOMATIC = 'automatic', 'Автоматическое'
 
-    # Категория
-    category = models.ForeignKey(
-        Category,
-        on_delete=models.PROTECT,
-        related_name='products',
-        verbose_name='Категория'
-    )
 
-    # Цена и единицы измерения
-    price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0.01'))],
-        verbose_name='Цена'
-    )
-    cost_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0'))],
-        default=0,
-        verbose_name='Себестоимость'
-    )
-    unit = models.CharField(
-        max_length=10,
-        choices=UNIT_CHOICES,
-        default='pcs',
-        verbose_name='Единица измерения'
-    )
+class ExpenseApplyType(models.TextChoices):
+    REGULAR = 'regular', 'Обычный'
+    UNIVERSAL = 'universal', 'Универсальный'
 
-    # Остатки и наличие
-    stock_quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        default=0,
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Остаток на складе'
-    )
-    low_stock_threshold = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        default=10,
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Минимальный остаток'
-    )
 
-    # Бонусная система
-    is_bonus_eligible = models.BooleanField(
-        default=True,
-        verbose_name='Участвует в бонусной программе'
-    )
-    bonus_points = models.PositiveIntegerField(
-        default=1,
-        verbose_name='Бонусные очки за товар'
-    )
+class ExpenseUnit(models.TextChoices):
+    PIECE = 'piece', 'Штука'
+    KG = 'kg', 'Килограмм'
+    GRAM = 'gram', 'Грамм'
 
-    # Изображения
-    main_image = models.ImageField(
-        upload_to='products/main/',
-        blank=True,
-        null=True,
-        verbose_name='Главное изображение'
-    )
 
-    # Характеристики
-    weight = models.DecimalField(
-        max_digits=8,
-        decimal_places=3,
-        null=True,
-        blank=True,
-        verbose_name='Вес (кг)'
-    )
-    volume = models.DecimalField(
-        max_digits=8,
-        decimal_places=3,
-        null=True,
-        blank=True,
-        verbose_name='Объём (л)'
-    )
+class Expense(models.Model):
+    """Расходы — только ADMIN управляет"""
+    name = models.CharField(max_length=255)
+    expense_type = models.CharField(max_length=20, choices=ExpenseType.choices)
 
-    # Статусы
-    is_active = models.BooleanField(default=True, verbose_name='Активен')
-    is_available = models.BooleanField(default=True, verbose_name='Доступен для заказа')
+    # Физические
+    price_per_unit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    unit = models.CharField(max_length=10, choices=ExpenseUnit.choices, null=True, blank=True)
 
-    # Производство
-    production_time_days = models.PositiveIntegerField(
-        default=1,
-        verbose_name='Время производства (дни)'
-    )
-    shelf_life_days = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        verbose_name='Срок годности (дни)'
-    )
+    # Накладные (месячная сумма)
+    monthly_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
-    # Метаданные
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
-    created_by = models.ForeignKey(
-        'users.User',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        verbose_name='Создал'
-    )
+    status = models.CharField(max_length=20, choices=ExpenseStatus.choices, default=ExpenseStatus.CIVILIAN)
+    state = models.CharField(max_length=20, choices=ExpenseState.choices, default=ExpenseState.AUTOMATIC)
+    apply_type = models.CharField(max_length=20, choices=ExpenseApplyType.choices, default=ExpenseApplyType.REGULAR)
+
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'products'
-        verbose_name = 'Товар'
-        verbose_name_plural = 'Товары'
-        ordering = ['name']
-        indexes = [
-            models.Index(fields=['name']),
-            models.Index(fields=['article']),
-            models.Index(fields=['category']),
-            models.Index(fields=['is_active', 'is_available']),
-        ]
-
-    def __str__(self):
-        return self.name
-
-    def save(self, *args, **kwargs):
-        if not self.slug:
-            self.slug = slugify(self.name, allow_unicode=True)
-        if not self.article:
-            # Генерируем артикул автоматически
-            self.article = f"ART-{self.category.id}-{self.id or '000'}"
-        super().save(*args, **kwargs)
-
-    @property
-    def is_in_stock(self):
-        """Есть ли товар в наличии"""
-        return self.stock_quantity > 0
-
-    @property
-    def is_low_stock(self):
-        """Мало товара на складе"""
-        return self.stock_quantity <= self.low_stock_threshold
-
-    @property
-    def profit_margin(self):
-        """Процент прибыли"""
-        if self.cost_price > 0:
-            return ((self.price - self.cost_price) / self.cost_price) * 100
-        return 0
-
-    @property
-    def profit_amount(self):
-        """Сумма прибыли с единицы"""
-        return self.price - self.cost_price
-
-    def can_fulfill_quantity(self, quantity):
-        """Можно ли выполнить заказ на указанное количество"""
-        return self.stock_quantity >= quantity
-
-    def reserve_quantity(self, quantity):
-        """Резервирование товара"""
-        if self.can_fulfill_quantity(quantity):
-            self.stock_quantity -= quantity
-            self.save(update_fields=['stock_quantity'])
-            return True
-        return False
-
-    def release_quantity(self, quantity):
-        """Освобождение зарезервированного товара"""
-        self.stock_quantity += quantity
-        self.save(update_fields=['stock_quantity'])
-
-
-class ProductImage(models.Model):
-    """Дополнительные изображения товара"""
-
-    product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        related_name='images',
-        verbose_name='Товар'
-    )
-    image = models.ImageField(
-        upload_to='products/gallery/',
-        verbose_name='Изображение'
-    )
-    title = models.CharField(max_length=200, blank=True, verbose_name='Название')
-    sort_order = models.PositiveIntegerField(default=0, verbose_name='Порядок')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Добавлено')
-
-    class Meta:
-        db_table = 'product_images'
-        verbose_name = 'Изображение товара'
-        verbose_name_plural = 'Изображения товаров'
-        ordering = ['sort_order', 'created_at']
-
-    def __str__(self):
-        return f"{self.product.name} - {self.title or 'Изображение'}"
-
-
-class ProductCharacteristic(models.Model):
-    """Характеристики товара"""
-
-    product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        related_name='characteristics',
-        verbose_name='Товар'
-    )
-    name = models.CharField(max_length=100, verbose_name='Название характеристики')
-    value = models.CharField(max_length=200, verbose_name='Значение')
-    unit = models.CharField(max_length=20, blank=True, verbose_name='Единица измерения')
-    sort_order = models.PositiveIntegerField(default=0, verbose_name='Порядок')
-
-    class Meta:
-        db_table = 'product_characteristics'
-        verbose_name = 'Характеристика товара'
-        verbose_name_plural = 'Характеристики товаров'
-        ordering = ['sort_order', 'name']
-        unique_together = ['product', 'name']
-
-    def __str__(self):
-        return f"{self.product.name} - {self.name}: {self.value}"
-
-
-class ProductPriceHistory(models.Model):
-    """История изменения цен"""
-
-    product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        related_name='price_history',
-        verbose_name='Товар'
-    )
-    old_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        verbose_name='Старая цена'
-    )
-    new_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        verbose_name='Новая цена'
-    )
-    changed_by = models.ForeignKey(
-        'users.User',
-        on_delete=models.SET_NULL,
-        null=True,
-        verbose_name='Изменил'
-    )
-    reason = models.CharField(max_length=200, blank=True, verbose_name='Причина изменения')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата изменения')
-
-    class Meta:
-        db_table = 'product_price_history'
-        verbose_name = 'История цен'
-        verbose_name_plural = 'История цен'
+        db_table = 'expenses'
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.product.name} - {self.old_price} → {self.new_price}"
+        return f"{self.name} ({self.get_expense_type_display()})"
+
+    def clean(self):
+        if self.expense_type == ExpenseType.PHYSICAL:
+            if not self.price_per_unit or not self.unit:
+                raise ValidationError("Физические расходы требуют цену и единицу измерения")
+
+        if self.expense_type == ExpenseType.OVERHEAD:
+            if not self.monthly_amount:
+                raise ValidationError("Накладные расходы требуют месячную сумму")
+
+    def save(self, *args, **kwargs):
+        # ВАЖНО: Вассал ставится только для НЕ-Сюзеренов с механическим состоянием
+        if self.state == ExpenseState.MECHANICAL and self.status != ExpenseStatus.SUZERAIN:
+            self.status = ExpenseStatus.VASSAL
+
+        super().save(*args, **kwargs)
+
+
+# ============= PRODUCTS =============
+
+class ProductCategory(models.TextChoices):
+    PIECE = 'piece', 'Штучный'
+    WEIGHT = 'weight', 'Весовой'
+
+
+class Product(models.Model):
+    # Убираем partner — товары создаёт только ADMIN
+    name = models.CharField(max_length=255)
+    description = models.CharField(max_length=250, blank=True)
+
+    category = models.CharField(max_length=10, choices=ProductCategory.choices, default=ProductCategory.PIECE)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    stock_quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    is_bonus = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    suzerain_expense = models.ForeignKey(
+        Expense,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='suzerain_products',
+        limit_choices_to={'status': ExpenseStatus.SUZERAIN}
+    )
+
+    position = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'products'
+        ordering = ['position', '-created_at']
+        unique_together = [['name']]  # Убираем partner
+
+    def __str__(self):
+        return self.name
+
+    def clean(self):
+        if self.category == ProductCategory.WEIGHT and self.is_bonus:
+            raise ValidationError("Весовой товар не может быть бонусным")
+
+    def get_price_for_weight(self, weight_kg):
+        if self.category != ProductCategory.WEIGHT:
+            return self.price
+        return (self.price / Decimal('10')) * (weight_kg / Decimal('0.1'))
+
+
+class ProductImage(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='products/')
+    position = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'product_images'
+        ordering = ['position']
+
+    def __str__(self):
+        return f"Image {self.position} for {self.product.name}"
+
+
+class ProductExpenseRelation(models.Model):
+    """Связь товара с расходами (пропорции)"""
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='expense_relations')
+    expense = models.ForeignKey(Expense, on_delete=models.CASCADE, related_name='product_relations')
+
+    # Пропорция на единицу товара (в граммах/штуках)
+    proportion = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'product_expense_relations'
+        unique_together = [['product', 'expense']]
+
+    def __str__(self):
+        return f"{self.product.name} - {self.expense.name}: {self.proportion}"
+
+
+# ============= PRODUCTION DATA =============
+
+class ProductionRecord(models.Model):
+    """Ежедневные данные производства (таблица из ТЗ)"""
+    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='production_records')
+    date = models.DateField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'production_records'
+        unique_together = [['partner', 'date']]
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"Production {self.partner.username} - {self.date}"
+
+
+class ProductionItem(models.Model):
+    """Строка в таблице производства"""
+    record = models.ForeignKey(ProductionRecord, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+
+    # Ввод
+    quantity_produced = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Количество товара
+    suzerain_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Или объём Сюзерена
+
+    # Расчёт
+    ingredient_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Стоимость ингредиентов
+    overhead_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Локальные расходы
+    total_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Общие расходы
+    cost_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Себестоимость
+    revenue = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Доход
+    net_profit = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Чистая прибыль
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'production_items'
+        unique_together = [['record', 'product']]
+
+    def __str__(self):
+        return f"{self.product.name} - {self.record.date}"
+
+
+class MechanicalExpenseEntry(models.Model):
+    """Механический учёт расходов (ежедневный)"""
+    record = models.ForeignKey(ProductionRecord, on_delete=models.CASCADE, related_name='mechanical_expenses')
+    expense = models.ForeignKey(Expense, on_delete=models.CASCADE, limit_choices_to={'state': ExpenseState.MECHANICAL})
+
+    amount_spent = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Обед/Солярка
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'mechanical_expense_entries'
+        unique_together = [['record', 'expense']]
+
+    def __str__(self):
+        return f"{self.expense.name} - {self.record.date}: {self.amount_spent}"
+
+
+# ============= BONUSES =============
+
+class BonusHistory(models.Model):
+    """История бонусов партнёра-магазина"""
+    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='bonus_given')
+    store = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='bonus_received')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+
+    bonus_count = models.IntegerField(default=0)  # Сколько бонусов дано
+    date = models.DateField(auto_now_add=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'bonus_history'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Bonus: {self.product.name} x{self.bonus_count} to {self.store.username}"
+
+
+class StoreProductCounter(models.Model):
+    """Счётчик товаров магазина (для бонусов каждый 21-й)"""
+    store = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='product_counters')
+    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='store_counters')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+
+    total_count = models.IntegerField(default=0)  # Всего куплено
+    bonus_eligible_count = models.IntegerField(default=0)  # Счётчик до бонуса (0-20)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'store_product_counters'
+        unique_together = [['store', 'partner', 'product']]
+
+    def __str__(self):
+        return f"{self.store.username} - {self.product.name}: {self.bonus_eligible_count}/21"
+
+
+# Добавить в конец models.py
+
+# В products/models.py — обновляем DefectiveProduct
+
+class DefectiveProduct(models.Model):
+    """Брак товара (партнёр фиксирует)"""
+    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='defective_products')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='defects')
+
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    reason = models.TextField(blank=True)
+    date = models.DateField(auto_now_add=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'defective_products'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Брак: {self.product.name} - {self.quantity} ({self.amount} сом)"
+
+    def save(self, *args, **kwargs):
+        if self.amount == 0 and self.product.category == 'weight':
+            self.amount = self.product.get_price_for_weight(self.quantity)
+
+        super().save(*args, **kwargs)
+
+        if self.product.stock_quantity >= self.quantity:
+            self.product.stock_quantity -= self.quantity
+            self.product.save()

@@ -1,11 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import RegionViewSet
+from .views import NotificationViewSet
 
 router = DefaultRouter()
-router.register(r'regions', RegionViewSet)
-
-app_name = 'regions'
+router.register('', NotificationViewSet, basename='notification')
 
 urlpatterns = [
     path('', include(router.urls)),

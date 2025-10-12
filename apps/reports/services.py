@@ -1,263 +1,186 @@
-from __future__ import annotations
+from django.db.models import Sum, Count, F, Q
+from orders.models import Order, OrderHistory, OrderItem
+from stores.models import Store
+from products.models import BonusHistory, DefectiveProduct, ProductionItem
 from datetime import date, timedelta
-from typing import Optional, Dict, Any, Iterable
-from decimal import Decimal, ROUND_HALF_UP
-
-from django.db import transaction
-from django.db.models import Sum
-
-from .models import (
-    Report,)
-from .waste_models import WasteLog, WasteReport
+from decimal import Decimal
+import pdfkit
+from django.template.loader import render_to_string
+from django.core.files.base import ContentFile
+from io import BytesIO
 
 
-def _daterange(d1: date, d2: date) -> Iterable[date]:
-    cur = d1
-    while cur <= d2:
-        yield cur
-        cur += timedelta(days=1)
-
-
-def _apply_filters(qs, partner_id: Optional[int], store_id: Optional[int], product_id: Optional[int]):
-    if partner_id:
-        qs = qs.filter(partner_id=partner_id)
-    if store_id:
-        qs = qs.filter(store_id=store_id)
-    if product_id:
-        qs = qs.filter(product_id=product_id)
-    return qs
-
-
-# ---------------- WASTE ----------------
-
-@transaction.atomic
-def rebuild_waste_daily(
-    date_on: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> int:
-    qs = WasteLog.objects.filter(date=date_on)
-    qs = _apply_filters(qs, partner_id, store_id, product_id)
-
-    grouped = (
-        qs.values("date", "partner_id", "store_id", "product_id")
-          .annotate(waste_quantity=Sum("quantity"), waste_amount=Sum("amount"))
-    )
-
-    updated = 0
-    for row in grouped:
-        WasteReport.objects.update_or_create(
-            date=row["date"],
-            partner_id=row["partner_id"],
-            store_id=row["store_id"],
-            product_id=row["product_id"],
-            defaults=dict(
-                waste_quantity=row["waste_quantity"] or Decimal("0"),
-                waste_amount=row["waste_amount"] or Decimal("0"),
-            ),
+class ReportGeneratorService:
+    @staticmethod
+    def generate_sales_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = Order.objects.filter(created_at__range=[date_from, date_to], status='confirmed')
+        if city:
+            queryset = queryset.filter(store__city=city)
+        if partner:
+            queryset = queryset.filter(partner=partner)
+        if store:
+            queryset = queryset.filter(store=store)
+        sales = queryset.aggregate(
+            total_income=Sum('total_amount'),
+            total_orders=Count('id')
         )
-        updated += 1
-    return updated
+        stores = queryset.values('store__name').annotate(amount=Sum('total_amount'))
+        total = sales['total_income'] or 0
+        shares = {s['store__name']: s['amount'] / total if total > 0 else 0 for s in stores}
+        return {'total_income': total, 'total_orders': sales['total_orders'] or 0, 'stores': list(stores), 'shares': shares}
 
+    @staticmethod
+    def generate_debt_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = Store.objects.all()
+        if city:
+            queryset = queryset.filter(city=city)
+        if store:
+            queryset = queryset.filter(id=store.id)
+        debts = queryset.aggregate(
+            total_debt=Sum('debt'),
+            count=Count('id')
+        )
+        stores = queryset.values('name').annotate(debt=Sum('debt'))
+        total = debts['total_debt'] or 0
+        shares = {s['name']: s['debt'] / total if total > 0 else 0 for s in stores}
+        return {'total_debt': total, 'store_count': debts['count'], 'stores': list(stores), 'shares': shares}
 
-def rebuild_waste_range(
-    date_from: date,
-    date_to: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> int:
-    total = 0
-    for d in _daterange(date_from, date_to):
-        total += rebuild_waste_daily(d, partner_id, store_id, product_id)
-    return total
+    @staticmethod
+    def generate_cost_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = ProductionItem.objects.filter(record__date__range=[date_from, date_to])
+        costs = queryset.aggregate(
+            total_cost=Sum('total_cost'),
+            net_profit=Sum('net_profit'),
+            total_revenue=Sum('revenue')
+        )
+        products = queryset.values('product__name').annotate(cost=Sum('total_cost'))
+        total_revenue = costs['total_revenue'] or 0
+        shares = {p['product__name']: p['cost'] / total_revenue if total_revenue > 0 else 0 for p in products}
+        return {
+            'total_cost': costs['total_cost'] or 0,
+            'net_profit': costs['net_profit'] or 0,
+            'total_revenue': total_revenue,
+            'products': list(products),
+            'shares': shares
+        }
 
+    @staticmethod
+    def generate_bonus_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = BonusHistory.objects.filter(date__range=[date_from, date_to])
+        if city:
+            queryset = queryset.filter(store__city=city)
+        if partner:
+            queryset = queryset.filter(partner=partner)
+        if store:
+            queryset = queryset.filter(store=store)
+        bonuses = queryset.aggregate(
+            total_bonus=Sum('bonus_count'),
+            total_amount=Sum(F('bonus_count') * F('product__price'))
+        )
+        products = queryset.values('product__name').annotate(count=Sum('bonus_count'))
+        total = bonuses['total_amount'] or 0
+        shares = {p['product__name']: p['count'] / total if total > 0 else 0 for p in products}
+        return {'total_bonus': bonuses['total_bonus'] or 0, 'total_amount': total, 'products': list(products), 'shares': shares}
 
-def _to_str(d: Decimal | None, places: str) -> str:
-    d = Decimal(d or 0)
-    return str(d.quantize(Decimal(places), rounding=ROUND_HALF_UP))
+    @staticmethod
+    def generate_brak_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = DefectiveProduct.objects.filter(date__range=[date_from, date_to])
+        if partner:
+            queryset = queryset.filter(partner=partner)
+        if store:
+            queryset = queryset.filter(order__store=store)
+        brak = queryset.aggregate(
+            total_brak=Sum('quantity'),
+            total_amount=Sum('amount')
+        )
+        products = queryset.values('product__name').annotate(quantity=Sum('quantity'))
+        total = brak['total_amount'] or 0
+        shares = {p['product__name']: p['quantity'] / total if total > 0 else 0 for p in products}
+        return {'total_brak': brak['total_brak'] or 0, 'total_amount': total, 'products': list(products), 'shares': shares}
 
+    @staticmethod
+    def generate_balance_report(date_from, date_to, city=None, partner=None, store=None):
+        sales = ReportGeneratorService.generate_sales_report(date_from, date_to, city, partner, store)['total_income']
+        costs = ReportGeneratorService.generate_cost_report(date_from, date_to, city, partner, store)['total_cost']
+        debts = ReportGeneratorService.generate_debt_report(date_from, date_to, city, partner, store)['total_debt']
+        bonuses = ReportGeneratorService.generate_bonus_report(date_from, date_to, city, partner, store)['total_amount']
+        balance = sales - costs - debts - bonuses
+        total = sales + costs + debts + bonuses
+        shares = {
+            'sales_share': sales / total if total > 0 else 0,
+            'costs_share': costs / total if total > 0 else 0,
+            'debts_share': debts / total if total > 0 else 0,
+            'bonuses_share': bonuses / total if total > 0 else 0
+        }
+        return {'balance': balance, 'sales': sales, 'costs': costs, 'debts': debts, 'bonuses': bonuses, 'shares': shares}
 
-from decimal import Decimal, ROUND_HALF_UP
+    @staticmethod
+    def generate_orders_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = Order.objects.filter(created_at__range=[date_from, date_to])
+        if city:
+            queryset = queryset.filter(store__city=city)
+        if partner:
+            queryset = queryset.filter(partner=partner)
+        if store:
+            queryset = queryset.filter(store=store)
+        orders = queryset.aggregate(
+            total_orders=Count('id'),
+            total_amount=Sum('total_amount'),
+            confirmed=Count('id', filter=Q(status='confirmed'))
+        )
+        stores = queryset.values('store__name').annotate(amount=Sum('total_amount'))
+        total = orders['total_amount'] or 0
+        shares = {s['store__name']: s['amount'] / total if total > 0 else 0 for s in stores}
+        return {
+            'total_orders': orders['total_orders'] or 0,
+            'total_amount': total,
+            'confirmed_orders': orders['confirmed'] or 0,
+            'stores': list(stores),
+            'shares': shares
+        }
 
-def _to_str(d: Decimal | None, places: str) -> str:
-    d = Decimal(d or 0)
-    return str(d.quantize(Decimal(places), rounding=ROUND_HALF_UP))
+    @staticmethod
+    def generate_products_report(date_from, date_to, city=None, partner=None, store=None):
+        queryset = OrderItem.objects.filter(order__created_at__range=[date_from, date_to])
+        if city:
+            queryset = queryset.filter(order__store__city=city)
+        if partner:
+            queryset = queryset.filter(order__partner=partner)
+        if store:
+            queryset = queryset.filter(order__store=store)
+        products = queryset.values('product__name').annotate(
+            total_quantity=Sum('quantity'),
+            total_amount=Sum(F('quantity') * F('price'))
+        )
+        total_amount = queryset.aggregate(total=Sum(F('quantity') * F('price')))['total'] or 0
+        shares = {p['product__name']: p['total_amount'] / total_amount if total_amount > 0 else 0 for p in products}
+        return {'products': list(products), 'total_amount': total_amount, 'shares': shares}
 
-def collect_waste_period_totals(
-    date_from: date,
-    date_to: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> Dict[str, Any]:
-    qs = WasteReport.objects.filter(date__range=(date_from, date_to))
-    qs = _apply_filters(qs, partner_id, store_id, product_id)
+    @staticmethod
+    def generate_markup_report(date_from, date_to, city=None, partner=None, store=None):
+        """Умная наценка: сравнение себестоимости и продаж"""
+        costs = ProductionItem.objects.filter(record__date__range=[date_from, date_to]).aggregate(
+            total_cost=Sum('total_cost')
+        )
+        sales = ReportGeneratorService.generate_sales_report(date_from, date_to, city, partner, store)['total_income']
+        markup = (sales - (costs['total_cost'] or 0)) / (costs['total_cost'] or 1) * 100
+        products = ProductionItem.objects.filter(record__date__range=[date_from, date_to]).values('product__name').annotate(
+            cost=Sum('total_cost'),
+            revenue=Sum('revenue')
+        )
+        shares = {p['product__name']: p['revenue'] / sales if sales > 0 else 0 for p in products}
+        return {
+            'markup_percentage': round(markup, 2),
+            'total_cost': costs['total_cost'] or 0,
+            'total_sales': sales,
+            'products': list(products),
+            'shares': shares
+        }
 
-    agg = qs.aggregate(
-        total_waste_quantity=Sum("waste_quantity"),
-        total_waste_amount=Sum("waste_amount"),
-    )
-    qty = agg["total_waste_quantity"]
-    amt = agg["total_waste_amount"]
-    return {
-        "total_waste_quantity": _to_str(qty, "0.001"),  # строка, 3 знака
-        "total_waste_amount": _to_str(amt, "0.01"),     # строка, 2 знака
-    }
-
-
-
-# ---------------- SALES ----------------
-
-@transaction.atomic
-def rebuild_sales_daily(
-    day: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> int:
-    return 0
-
-
-# ---------------- INVENTORY ----------------
-
-@transaction.atomic
-def rebuild_inventory_daily(
-    day: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> int:
-    return 0
-
-
-# ---------------- DEBTS ----------------
-
-@transaction.atomic
-def rebuild_debts_daily(
-    day: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-) -> int:
-    return 0
-
-
-# ---------------- BONUS ----------------
-
-@transaction.atomic
-def rebuild_bonus_daily(
-    day: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> int:
-    return 0
-
-
-@transaction.atomic
-def rebuild_bonus_monthly(
-    year: int,
-    month: int,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None
-) -> int:
-    return 0
-
-
-# ---------------- COST ----------------
-
-@transaction.atomic
-def rebuild_cost_on_date(
-    day: date,
-    product_id: int,
-    production_batch_id: Optional[int] = None,
-) -> int:
-    return 0
-
-
-# ---------------- ENTRY POINT ----------------
-
-def _build_report_data(
-    report_type: str,
-    date_from: date,
-    date_to: date,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-) -> Dict[str, Any]:
-    base_meta = {
-        "report_type": report_type,
-        "period": {"date_from": str(date_from), "date_to": str(date_to)},
-        "filters": {"partner_id": partner_id, "store_id": store_id, "product_id": product_id},
-    }
-
-    if report_type == "waste":
-        rebuilt = rebuild_waste_range(date_from, date_to, partner_id, store_id, product_id)
-        totals = collect_waste_period_totals(date_from, date_to, partner_id, store_id, product_id)
-        return {**base_meta, "rebuilt_rows": rebuilt, "totals": totals}
-
-    if report_type == "sales":
-        return {**base_meta, "status": "sales_not_implemented"}
-
-    if report_type == "inventory":
-        return {**base_meta, "status": "inventory_not_implemented"}
-
-    if report_type == "debts":
-        return {**base_meta, "status": "debts_not_implemented"}
-
-    if report_type == "bonuses":
-        return {**base_meta, "status": "bonuses_not_implemented"}
-
-    if report_type == "costs":
-        return {**base_meta, "status": "costs_not_implemented"}
-
-    if report_type == "profit":
-        return {**base_meta, "status": "profit_not_implemented"}
-
-    if report_type == "partner_performance":
-        return {**base_meta, "status": "partner_perf_not_implemented"}
-
-    if report_type == "store_performance":
-        return {**base_meta, "status": "store_perf_not_implemented"}
-
-    return {**base_meta, "status": "unknown_report_type"}
-
-
-@transaction.atomic
-def generate_and_save_report(
-    *,
-    name: str,
-    report_type: str,
-    period: str,
-    date_from: date,
-    date_to: date,
-    created_by_id: int,
-    partner_id: Optional[int] = None,
-    store_id: Optional[int] = None,
-    product_id: Optional[int] = None,
-    is_automated: bool = False,
-) -> Report:
-    data = _build_report_data(
-        report_type=report_type,
-        date_from=date_from,
-        date_to=date_to,
-        partner_id=partner_id,
-        store_id=store_id,
-        product_id=product_id,
-    )
-
-    report = Report.objects.create(
-        name=name,
-        report_type=report_type,
-        period=period,
-        date_from=date_from,
-        date_to=date_to,
-        store_id=store_id,
-        partner_id=partner_id,
-        product_id=product_id,
-        data=data,
-        created_by_id=created_by_id,
-        is_automated=is_automated,
-    )
-    return report
+    @staticmethod
+    def export_to_pdf(report):
+        """Экспорт отчета в PDF"""
+        html = render_to_string('reports/report_template.html', {'report': report})
+        output = BytesIO()
+        pdfkit.from_string(html, output)
+        return ContentFile(output.getvalue(), f'report_{report.id}.pdf')

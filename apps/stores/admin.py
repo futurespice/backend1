@@ -1,207 +1,202 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from django.urls import reverse
-from django.utils.safestring import mark_safe
-from .models import Store, StoreInventory, StoreRequest
+from .models import (
+    Region, City, Store, StoreSelection,
+    StoreProductRequest, StoreRequest, StoreRequestItem,
+    StoreInventory, PartnerInventory, ReturnRequest, ReturnRequestItem
+)
+from django.db.models import Sum
 
 
-class StoreInventoryInline(admin.TabularInline):
-    """Инлайн для остатков товаров в магазине"""
-    model = StoreInventory
-    extra = 0
-    readonly_fields = ['last_updated']
-    fields = ['product', 'quantity', 'reserved_quantity', 'last_updated']
+@admin.register(Region)
+class RegionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'name', 'code']
+    search_fields = ['name', 'code']
+    ordering = ['name']
+
+
+@admin.register(City)
+class CityAdmin(admin.ModelAdmin):
+    list_display = ['id', 'name', 'region']
+    list_filter = ['region']
+    search_fields = ['name', 'region__name']
+    ordering = ['region', 'name']
 
 
 @admin.register(Store)
 class StoreAdmin(admin.ModelAdmin):
-    """Админка для магазинов"""
-
     list_display = [
-        'store_name', 'user_info', 'region', 'partner_info',
-        'total_debt_display', 'orders_count', 'is_active', 'created_at'
+        'id', 'name_display', 'inn', 'owner_name', 'phone_display',
+        'city_display', 'debt_display', 'approval_status', 'is_active', 'created_at'
     ]
-    list_filter = [
-        'is_active', 'region', 'partner', 'created_at'
-    ]
-    search_fields = [
-        'store_name', 'address', 'user__name', 'user__email',
-        'user__phone', 'partner__name'
-    ]
+    list_filter = ['approval_status', 'is_active', 'region', 'city', 'created_at']
+    search_fields = ['name', 'inn', 'owner_name', 'phone']
+    readonly_fields = ['created_by', 'created_at', 'updated_at']
     ordering = ['-created_at']
 
     fieldsets = (
         ('Основная информация', {
-            'fields': ('user', 'store_name', 'address')
+            'fields': ('name', 'inn', 'owner_name', 'phone')
         }),
-        ('Локация', {
-            'fields': ('region', 'latitude', 'longitude'),
-            'description': 'GPS координаты для точного местоположения'
+        ('Местоположение', {
+            'fields': ('region', 'city', 'address', ('latitude', 'longitude'))
         }),
-        ('Партнёр', {
-            'fields': ('partner',),
-            'description': 'Партнёр, который обслуживает этот магазин'
+        ('Финансы', {
+            'fields': ('debt',)
         }),
         ('Статус', {
-            'fields': ('is_active',)
+            'fields': ('approval_status', 'is_active')
         }),
-        ('Метаданные', {
-            'fields': ('created_at', 'updated_at'),
+        ('Системная информация', {
+            'fields': ('created_by', 'created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
 
-    readonly_fields = ['created_at', 'updated_at']
-    inlines = [StoreInventoryInline]
+    def name_display(self, obj):
+        return format_html('<strong>{}</strong>', obj.name)
 
-    def user_info(self, obj):
-        return format_html(
-            '<strong>{}</strong><br/><small>{}<br/>{}</small>',
-            obj.user.get_full_name(),
-            obj.user.email,
-            obj.user.phone
-        )
+    name_display.short_description = 'Название'
 
-    user_info.short_description = 'Владелец'
+    def phone_display(self, obj):
+        return format_html('<span style="color: blue;">{}</span>', obj.phone)
 
-    def partner_info(self, obj):
-        if obj.partner:
-            return format_html(
-                '<strong>{}</strong><br/><small>{}</small>',
-                obj.partner.get_full_name(),
-                obj.partner.phone
-            )
-        return '-'
+    phone_display.short_description = 'Телефон'
 
-    partner_info.short_description = 'Партнёр'
+    def city_display(self, obj):
+        return f"{obj.city.name} ({obj.region.name})"
 
-    def total_debt_display(self, obj):
-        debt = obj.total_debt
-        if debt > 0:
-            return format_html('<span style="color: red;">{} сом</span>', debt)
-        return '0 сом'
+    city_display.short_description = 'Город'
 
-    total_debt_display.short_description = 'Долг'
+    def debt_display(self, obj):
+        if obj.debt <= 0:
+            return format_html('<span style="color: green;">0 сом</span>')
+        elif obj.debt < 10000:
+            return format_html('<span style="color: orange;">{} сом</span>', obj.debt)
+        return format_html('<span style="color: red;">{} сом</span>', obj.debt)
 
-    # Действия
-    actions = ['assign_partner', 'activate_stores', 'deactivate_stores']
+    debt_display.short_description = 'Долг'
 
-    def assign_partner(self, request, queryset):
-        # Здесь можно добавить форму для выбора партнёра
-        self.message_user(request, 'Для назначения партнёра используйте редактирование магазина.')
+    actions = ['approve_stores', 'reject_stores']
 
-    assign_partner.short_description = 'Назначить партнёра'
+    def approve_stores(self, request, queryset):
+        updated = queryset.update(approval_status='approved')
+        self.message_user(request, f'Одобрено {updated} магазинов')
 
-    def activate_stores(self, request, queryset):
-        updated = queryset.update(is_active=True)
-        self.message_user(request, f'Активировано {updated} магазинов.')
+    approve_stores.short_description = 'Одобрить выбранные магазины'
 
-    activate_stores.short_description = 'Активировать выбранные магазины'
+    def reject_stores(self, request, queryset):
+        updated = queryset.update(approval_status='rejected', is_active=False)
+        self.message_user(request, f'Отклонено {updated} магазинов')
 
-    def deactivate_stores(self, request, queryset):
-        updated = queryset.update(is_active=False)
-        self.message_user(request, f'Деактивировано {updated} магазинов.')
-
-    deactivate_stores.short_description = 'Деактивировать выбранные магазины'
+    reject_stores.short_description = 'Отклонить выбранные магазины'
 
 
-@admin.register(StoreInventory)
-class StoreInventoryAdmin(admin.ModelAdmin):
-    """Админка для остатков товаров в магазинах"""
+class StoreRequestItemInline(admin.TabularInline):
+    model = StoreRequestItem
+    extra = 1
+    readonly_fields = ['total']
 
-    list_display = [
-        'store', 'product', 'quantity', 'reserved_quantity',
-        'available_quantity_display', 'last_updated'
-    ]
-    list_filter = ['store', 'product__category', 'last_updated']
-    search_fields = ['store__store_name', 'product__name']
-    ordering = ['-last_updated']
 
-    def available_quantity_display(self, obj):
-        available = obj.available_quantity
-        if available <= 0:
-            return format_html('<span style="color: red;">{}</span>', available)
-        elif available < 10:
-            return format_html('<span style="color: orange;">{}</span>', available)
-        return str(available)
+@admin.register(StoreSelection)
+class StoreSelectionAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'store', 'selected_at']
+    list_filter = ['selected_at']
+    search_fields = ['user__name', 'store__name']
+    readonly_fields = ['selected_at']
 
-    available_quantity_display.short_description = 'Доступно'
 
-    # Ограничиваем изменения
-    def has_add_permission(self, request):
-        return request.user.is_superuser
-
-    def has_delete_permission(self, request, obj=None):
-        return request.user.is_superuser
+@admin.register(StoreProductRequest)
+class StoreProductRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'store', 'product', 'quantity', 'created_at']
+    list_filter = ['created_at']
+    search_fields = ['store__name', 'product__name']
+    readonly_fields = ['created_at']
 
 
 @admin.register(StoreRequest)
 class StoreRequestAdmin(admin.ModelAdmin):
-    """Админка для запросов товаров"""
-
     list_display = [
-        'id', 'store', 'partner', 'status_display',
-        'total_items', 'total_quantity', 'requested_at'
+        'id', 'store', 'created_by_display', 'total_amount_display',
+        'items_count', 'note', 'status', 'created_at'
     ]
-    list_filter = ['status', 'requested_at', 'processed_at']
-    search_fields = ['store__store_name', 'partner__name']
-    ordering = ['-requested_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['store__name', 'created_by__name', 'note']
+    readonly_fields = ['created_by', 'created_at']
+    inlines = [StoreRequestItemInline]
 
-    fieldsets = (
-        ('Основная информация', {
-            'fields': ('store', 'partner', 'status')
-        }),
-        ('Даты', {
-            'fields': ('requested_at', 'processed_at', 'delivered_at')
-        }),
-        ('Комментарии', {
-            'fields': ('store_notes', 'partner_notes'),
-            'classes': ('collapse',)
-        }),
-    )
+    def created_by_display(self, obj):
+        if obj.created_by:
+            return format_html(
+                '<a href="?created_by__id__exact={}">{}</a>',
+                obj.created_by.id,
+                obj.created_by.phone
+            )
+        return '—'
 
-    readonly_fields = ['requested_at', 'processed_at', 'delivered_at']
+    created_by_display.short_description = 'Создал'
 
-    def status_display(self, obj):
-        colors = {
-            'pending': 'orange',
-            'approved': 'green',
-            'rejected': 'red',
-            'delivered': 'blue',
-            'cancelled': 'gray'
-        }
-        color = colors.get(obj.status, 'black')
-        return format_html(
-            '<span style="color: {};">{}</span>',
-            color,
-            obj.get_status_display()
-        )
+    def total_amount_display(self, obj):
+        return format_html('<strong>{} сом</strong>', obj.total_amount)
 
-    status_display.short_description = 'Статус'
+    total_amount_display.short_description = 'Сумма'
 
-    # Действия
-    actions = ['approve_requests', 'reject_requests']
+    def items_count(self, obj):
+        return obj.items.count()
 
-    def approve_requests(self, request, queryset):
-        approved = 0
-        for req in queryset.filter(status='pending'):
-            req.approve(request.user)
-            approved += 1
-        self.message_user(request, f'Одобрено {approved} запросов.')
-
-    approve_requests.short_description = 'Одобрить выбранные запросы'
-
-    def reject_requests(self, request, queryset):
-        rejected = 0
-        for req in queryset.filter(status='pending'):
-            req.reject(request.user, 'Отклонено администратором')
-            rejected += 1
-        self.message_user(request, f'Отклонено {rejected} запросов.')
-
-    reject_requests.short_description = 'Отклонить выбранные запросы'
-
-    # Ограничиваем изменения
-    def has_add_permission(self, request):
-        return False  # Запросы создаются только через API
+    items_count.short_description = 'Позиций'
 
 
+@admin.register(StoreInventory)
+class StoreInventoryAdmin(admin.ModelAdmin):
+    list_display = ['id', 'store', 'product', 'quantity_display', 'total_price_display', 'last_updated']
+    list_filter = ['store', 'last_updated']
+    search_fields = ['store__name', 'product__name']
+    readonly_fields = ['last_updated']
+    ordering = ['-last_updated']
+
+    def quantity_display(self, obj):
+        if obj.quantity <= 0:
+            return format_html('<span style="color: red;">0</span>')
+        elif obj.quantity < 10:
+            return format_html('<span style="color: orange;">{} {}</span>', obj.quantity,
+                               obj.product.get_unit_display())
+        return format_html('<span style="color: green;">{} {}</span>', obj.quantity, obj.product.get_unit_display())
+
+    quantity_display.short_description = 'Количество'
+
+    def total_price_display(self, obj):
+        return format_html('<strong>{} сом</strong>', obj.total_price)
+
+    total_price_display.short_description = 'Стоимость'
+
+
+@admin.register(PartnerInventory)
+class PartnerInventoryAdmin(admin.ModelAdmin):
+    list_display = ['id', 'partner', 'product', 'quantity_display', 'last_updated']
+    list_filter = ['partner', 'last_updated']
+    search_fields = ['partner__name', 'product__name']
+    readonly_fields = ['last_updated']
+    ordering = ['-last_updated']
+
+    def quantity_display(self, obj):
+        if obj.quantity <= 0:
+            return format_html('<span style="color: red;">0</span>')
+        return format_html('<span style="color: green;">{} {}</span>', obj.quantity, obj.product.get_unit_display())
+
+    quantity_display.short_description = 'Количество'
+
+
+class ReturnRequestItemInline(admin.TabularInline):
+    model = ReturnRequestItem
+    extra = 1
+    readonly_fields = ['total']  # Optional, if you have a total property
+
+
+@admin.register(ReturnRequest)
+class ReturnRequestAdmin(admin.ModelAdmin):
+    list_display = ['id', 'store', 'status', 'total_amount', 'reason', 'created_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['store__name', 'reason']
+    readonly_fields = ['created_at']
+    inlines = [ReturnRequestItemInline]

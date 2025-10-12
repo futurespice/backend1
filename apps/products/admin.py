@@ -1,67 +1,92 @@
 from django.contrib import admin
-from .models import Category, Product, ProductImage, ProductCharacteristic
+from .models import (
+    Expense, Product, ProductImage, ProductExpenseRelation,
+    ProductionRecord, ProductionItem, MechanicalExpenseEntry,
+    BonusHistory, StoreProductCounter, DefectiveProduct
+)
+
+
+@admin.register(Expense)
+class ExpenseAdmin(admin.ModelAdmin):
+    list_display = ['name', 'expense_type', 'status', 'state', 'price_per_unit', 'monthly_amount', 'is_active']
+    list_filter = ['expense_type', 'status', 'state', 'is_active']
+    search_fields = ['name']
+    readonly_fields = ['created_at', 'updated_at']
+
+    def get_readonly_fields(self, request, obj=None):
+        """Если статус Сюзерен — он не меняется автоматически"""
+        if obj and obj.status == 'suzerain':
+            return self.readonly_fields
+        return self.readonly_fields
+
 
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
     extra = 1
-    fields = ['image', 'title', 'sort_order']
+    max_num = 3
 
-class ProductCharacteristicInline(admin.TabularInline):
-    model = ProductCharacteristic
+
+class ProductExpenseRelationInline(admin.TabularInline):
+    model = ProductExpenseRelation
     extra = 1
-    fields = ['name', 'value', 'unit', 'sort_order']
 
-@admin.register(Category)
-class CategoryAdmin(admin.ModelAdmin):
-    list_display = ['name', 'parent', 'is_active', 'sort_order', 'created_at']
-    list_filter = ['is_active', 'parent']
-    search_fields = ['name', 'description']
-    ordering = ['sort_order', 'name']
-    prepopulated_fields = {'slug': ('name',)}
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = [
-        'name', 'article', 'category', 'price', 'stock_quantity',
-        'is_active', 'is_available', 'created_at'
-    ]
-    list_filter = ['is_active', 'is_available', 'category', 'unit']
-    search_fields = ['name', 'description', 'article']
-    ordering = ['name']
-    inlines = [ProductImageInline, ProductCharacteristicInline]
-    prepopulated_fields = {'slug': ('name',)}
-
-    fieldsets = (
-        ('Основная информация', {
-            'fields': ('name', 'description', 'article', 'slug', 'category')
-        }),
-        ('Цены', {
-            'fields': ('price', 'cost_price', 'unit')
-        }),
-        ('Остатки', {
-            'fields': ('stock_quantity', 'low_stock_threshold')
-        }),
-        ('Бонусы', {
-            'fields': ('is_bonus_eligible', 'bonus_points')
-        }),
-        ('Изображения', {
-            'fields': ('main_image',)
-        }),
-        ('Характеристики', {
-            'fields': ('weight', 'volume')
-        }),
-        ('Статусы', {
-            'fields': ('is_active', 'is_available')
-        }),
-        ('Производство', {
-            'fields': ('production_time_days', 'shelf_life_days')
-        }),
-    )
-
+    list_display = ['name', 'category', 'price', 'is_bonus', 'is_active', 'position']
+    list_filter = ['category', 'is_bonus', 'is_active']
+    search_fields = ['name']
     readonly_fields = ['created_at', 'updated_at']
+    inlines = [ProductImageInline, ProductExpenseRelationInline]
 
-@admin.register(ProductImage)
-class ProductImageAdmin(admin.ModelAdmin):
-    list_display = ['product', 'title', 'sort_order']
-    list_filter = ['product']
-    ordering = ['product', 'sort_order']
+
+@admin.register(ProductExpenseRelation)
+class ProductExpenseRelationAdmin(admin.ModelAdmin):
+    list_display = ['product', 'expense', 'proportion']
+    search_fields = ['product__name', 'expense__name']
+
+
+class ProductionItemInline(admin.TabularInline):
+    model = ProductionItem
+    extra = 0
+    readonly_fields = ['ingredient_cost', 'overhead_cost', 'total_cost', 'cost_price', 'revenue', 'net_profit']
+
+
+class MechanicalExpenseEntryInline(admin.TabularInline):
+    model = MechanicalExpenseEntry
+    extra = 1
+
+
+@admin.register(ProductionRecord)
+class ProductionRecordAdmin(admin.ModelAdmin):
+    list_display = ['date', 'created_at']
+    list_filter = ['date']
+    readonly_fields = ['created_at', 'updated_at']
+    inlines = [ProductionItemInline, MechanicalExpenseEntryInline]
+
+
+@admin.register(ProductionItem)
+class ProductionItemAdmin(admin.ModelAdmin):
+    list_display = ['record', 'product', 'quantity_produced', 'cost_price', 'net_profit']
+    readonly_fields = ['ingredient_cost', 'overhead_cost', 'total_cost', 'cost_price', 'revenue', 'net_profit']
+
+
+@admin.register(BonusHistory)
+class BonusHistoryAdmin(admin.ModelAdmin):
+    list_display = ['partner', 'store', 'product', 'bonus_count', 'date']
+    list_filter = ['date']
+    search_fields = ['partner__username', 'store__username', 'product__name']
+
+
+@admin.register(StoreProductCounter)
+class StoreProductCounterAdmin(admin.ModelAdmin):
+    list_display = ['store', 'partner', 'product', 'total_count', 'bonus_eligible_count']
+    search_fields = ['store__username', 'partner__username', 'product__name']
+
+
+@admin.register(DefectiveProduct)
+class DefectiveProductAdmin(admin.ModelAdmin):
+    list_display = ['product', 'partner', 'quantity', 'amount', 'date']
+    list_filter = ['date']
+    search_fields = ['product__name', 'partner__username']
+    readonly_fields = ['created_at']

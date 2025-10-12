@@ -1,18 +1,22 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    StoreViewSet, StoreRequestViewSet, ProductCatalogView, StoreInventoryViewSet
+    RegionViewSet, StoreViewSet, StoreSelectionViewSet,
+    StoreProductRequestViewSet, StoreRequestViewSet,
+    StoreInventoryViewSet, PartnerInventoryViewSet,
+    ReturnRequestViewSet
 )
 
 router = DefaultRouter()
-router.register(r'stores', StoreViewSet, basename='stores')
-router.register(r'requests', StoreRequestViewSet, basename='store-requests')
-router.register(r'inventory', StoreInventoryViewSet, basename='store-inventory')
+router.register('regions', RegionViewSet, basename='regions')
+router.register('stores', StoreViewSet, basename='stores')
+router.register('selection', StoreSelectionViewSet, basename='selection')
+router.register('product-requests', StoreProductRequestViewSet, basename='product-requests')
+router.register('requests', StoreRequestViewSet, basename='requests')
+router.register('inventory', StoreInventoryViewSet, basename='inventory')
+router.register('partner-inventory', PartnerInventoryViewSet, basename='partner-inventory')
+router.register('returns', ReturnRequestViewSet, basename='returns')
 
 urlpatterns = [
-    # Каталог товаров для магазинов
-    path('catalog/', ProductCatalogView.as_view(), name='product-catalog'),
-
-    # Роуты ViewSet'ов
     path('', include(router.urls)),
 ]

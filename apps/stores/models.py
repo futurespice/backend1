@@ -1,104 +1,268 @@
 from django.db import models
 from django.conf import settings
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, RegexValidator
 from decimal import Decimal
+from django.core.exceptions import ValidationError
+
+
+class Region(models.Model):
+    """Регион/Область"""
+    name = models.CharField(max_length=100, unique=True, verbose_name='Название')
+    code = models.CharField(max_length=10, unique=True, blank=True, verbose_name='Код')
+
+    class Meta:
+        db_table = 'regions'
+        verbose_name = 'Регион'
+        verbose_name_plural = 'Регионы'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class City(models.Model):
+    """Город"""
+    region = models.ForeignKey(
+        Region,
+        on_delete=models.CASCADE,
+        related_name='cities',
+        verbose_name='Регион'
+    )
+    name = models.CharField(max_length=100, verbose_name='Название')
+
+    class Meta:
+        db_table = 'cities'
+        verbose_name = 'Город'
+        verbose_name_plural = 'Города'
+        ordering = ['region', 'name']
+        unique_together = ['region', 'name']
+
+    def __str__(self):
+        return f"{self.name} ({self.region.name})"
 
 
 class Store(models.Model):
-    """Модель магазина"""
-
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='store_profile',
-        verbose_name='Пользователь'
-    )
-    store_name = models.CharField(max_length=200, verbose_name='Название магазина')
-    address = models.TextField(verbose_name='Адрес')
-
-    # GPS координаты
-    latitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
-        verbose_name='Широта'
-    )
-    longitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        null=True,
-        blank=True,
-        verbose_name='Долгота'
+    """
+    Магазин - общая сущность.
+    Любой пользователь с ролью STORE может выбрать магазин и работать от его имени.
+    """
+    inn_regex = RegexValidator(
+        regex=r'^\d{12,14}$',
+        message='ИНН должен быть 12-14 цифр'
     )
 
-    # Связи
+    phone_regex = RegexValidator(
+        regex=r'^\+996\d{9}$',
+        message="Формат: +996XXXXXXXXX"
+    )
+
+    # Основная информация
+    name = models.CharField(max_length=200, verbose_name='Название магазина')
+    inn = models.CharField(
+        max_length=14,
+        validators=[inn_regex],
+        unique=True,
+        verbose_name='ИНН'
+    )
+    owner_name = models.CharField(max_length=200, verbose_name='ФИО владельца')
+    phone = models.CharField(
+        max_length=13,
+        validators=[phone_regex],
+        verbose_name='Телефон'
+    )
+
+    # Местоположение
     region = models.ForeignKey(
-        'regions.Region',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='stores',
+        Region,
+        on_delete=models.PROTECT,
         verbose_name='Регион'
     )
-    partner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='partner_stores',
-        limit_choices_to={'role': 'partner'},
-        verbose_name='Партнёр'
+    city = models.ForeignKey(
+        City,
+        on_delete=models.PROTECT,
+        verbose_name='Город'
+    )
+    address = models.CharField(max_length=250, verbose_name='Адрес')
+    latitude = models.FloatField(null=True, blank=True, verbose_name='Широта')
+    longitude = models.FloatField(null=True, blank=True, verbose_name='Долгота')
+
+    # Финансы
+    debt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Долг'
     )
 
     # Статус
+    approval_status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Ожидает'), ('approved', 'Принят'), ('rejected', 'Отклонен')],
+        default='pending',
+        verbose_name='Статус одобрения'
+    )
     is_active = models.BooleanField(default=True, verbose_name='Активен')
 
-    # Метаданные
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
+    # Системная информация
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        verbose_name='Создал'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
 
     class Meta:
         db_table = 'stores'
         verbose_name = 'Магазин'
         verbose_name_plural = 'Магазины'
         ordering = ['-created_at']
+        indexes = [models.Index(fields=['inn', 'phone'])]
 
     def __str__(self):
-        return f"{self.store_name} ({self.user.get_full_name()})"
+        return self.name
+
+
+class StoreSelection(models.Model):
+    """Выбор магазина пользователем (роль STORE)"""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        limit_choices_to={'role': 'store'},
+        verbose_name='Пользователь'
+    )
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='selections',
+        verbose_name='Магазин'
+    )
+    selected_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата выбора')
+
+    class Meta:
+        db_table = 'store_selections'
+        verbose_name = 'Выбор магазина'
+        verbose_name_plural = 'Выборы магазинов'
+
+    def __str__(self):
+        return f"{self.user.name} → {self.store.name}"
+
+
+class StoreProductRequest(models.Model):
+    """Запрос магазина на товар (не влияет на инвентарь)"""
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='product_requests',
+        verbose_name='Магазин'
+    )
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        verbose_name='Товар'
+    )
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.1'))],
+        verbose_name='Количество'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    class Meta:
+        db_table = 'store_product_requests'
+        verbose_name = 'Запрос товара'
+        verbose_name_plural = 'Запросы товаров'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.store.name} → {self.product.name}: {self.quantity}"
+
+
+class StoreRequest(models.Model):
+    """История запросов магазина"""
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='requests',
+        verbose_name='Магазин'
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        verbose_name='Создал'
+    )
+    total_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Общая сумма'
+    )
+    note = models.TextField(blank=True, verbose_name='Примечание')
+    status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Ожидает'), ('approved', 'Подтвержден'), ('rejected', 'Отклонен'), ('cancelled', 'Отменен')],
+        default='pending',
+        verbose_name='Статус'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    class Meta:
+        db_table = 'store_requests'
+        verbose_name = 'Запрос магазина'
+        verbose_name_plural = 'Запросы магазинов'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Запрос {self.id} от {self.store.name}"
+
+
+class StoreRequestItem(models.Model):
+    """Позиция в запросе магазина"""
+    request = models.ForeignKey(
+        StoreRequest,
+        on_delete=models.CASCADE,
+        related_name='items',
+        verbose_name='Запрос'
+    )
+    product = models.ForeignKey(
+        'products.Product',
+        on_delete=models.CASCADE,
+        verbose_name='Товар'
+    )
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.1'))],
+        verbose_name='Количество'
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Цена за единицу'
+    )
+    is_cancelled = models.BooleanField(default=False, verbose_name='Отменено')
+
+    class Meta:
+        db_table = 'store_request_items'
+        verbose_name = 'Позиция запроса'
+        verbose_name_plural = 'Позиции запросов'
+
+    def __str__(self):
+        return f"{self.product.name}: {self.quantity} ({self.request.id})"
 
     @property
-    def total_debt(self):
-        """Общий долг магазина"""
-        try:
-            from debts.models import Debt
-            total = Debt.objects.filter(
-                store=self,
-                is_paid=False
-            ).aggregate(
-                total=models.Sum('amount')
-            )['total']
-            return total or Decimal('0')
-        except:
-            return Decimal('0')
-
-    @property
-    def orders_count(self):
-        """Количество заказов"""
-        return self.orders.count()
-
-    def get_inventory_for_product(self, product):
-        """Получить остаток товара в магазине"""
-        try:
-            inventory = self.inventory.get(product=product)
-            return inventory.available_quantity
-        except StoreInventory.DoesNotExist:
-            return Decimal('0')
+    def total(self):
+        return self.quantity * self.price
 
 
 class StoreInventory(models.Model):
-    """Остатки товаров в магазинах"""
-
+    """Инвентарь магазина"""
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
@@ -108,279 +272,159 @@ class StoreInventory(models.Model):
     product = models.ForeignKey(
         'products.Product',
         on_delete=models.CASCADE,
-        related_name='store_inventory',
         verbose_name='Товар'
     )
     quantity = models.DecimalField(
         max_digits=10,
-        decimal_places=3,
+        decimal_places=2,
         default=Decimal('0'),
         validators=[MinValueValidator(Decimal('0'))],
         verbose_name='Количество'
-    )
-    reserved_quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Зарезервировано'
     )
     last_updated = models.DateTimeField(auto_now=True, verbose_name='Последнее обновление')
 
     class Meta:
         db_table = 'store_inventory'
-        verbose_name = 'Остаток товара'
-        verbose_name_plural = 'Остатки товаров'
+        verbose_name = 'Инвентарь магазина'
+        verbose_name_plural = 'Инвентарь магазинов'
         unique_together = ['store', 'product']
-        ordering = ['store', 'product']
 
     def __str__(self):
-        return f"{self.store.store_name} - {self.product.name}: {self.available_quantity}"
+        return f"{self.store.name} - {self.product.name}: {self.quantity} {self.product.get_unit_display()}"
 
     @property
-    def available_quantity(self):
-        """Доступное количество (общее - зарезервированное)"""
-        return self.quantity - self.reserved_quantity
+    def total_price(self):
+        """Общая стоимость товара в инвентаре"""
+        return self.quantity * self.product.price
 
-    def reserve_quantity(self, amount):
-        """Зарезервировать количество"""
-        if amount <= self.available_quantity:
-            self.reserved_quantity += amount
-            self.save()
-            return True
-        return False
-
-    def release_reservation(self, amount):
-        """Освободить резерв"""
-        if amount <= self.reserved_quantity:
-            self.reserved_quantity -= amount
-            self.save()
-            return True
-        return False
-
-    def reduce_quantity(self, amount):
-        """Уменьшить количество (при отгрузке)"""
-        if amount <= self.quantity:
-            self.quantity -= amount
-            # Также уменьшаем резерв, если он есть
-            if self.reserved_quantity > 0:
-                reduction_from_reserve = min(amount, self.reserved_quantity)
-                self.reserved_quantity -= reduction_from_reserve
-            self.save()
-            return True
-        return False
-
-
-class StoreRequest(models.Model):
-    """Запросы товаров от магазинов"""
-
-    STATUS_CHOICES = [
-        ('pending', 'Ожидает'),
-        ('approved', 'Одобрен'),
-        ('rejected', 'Отклонён'),
-        ('delivered', 'Доставлен'),
-        ('cancelled', 'Отменён'),
-    ]
-
-    store = models.ForeignKey(
-        Store,
-        on_delete=models.CASCADE,
-        related_name='requests',
-        verbose_name='Магазин'
-    )
-    partner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='partner_requests',
-        limit_choices_to={'role': 'partner'},
-        verbose_name='Партнёр'
-    )
-    status = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default='pending',
-        verbose_name='Статус'
-    )
-
-    # Даты
-    requested_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата запроса')
-    processed_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата обработки')
-    delivered_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата доставки')
-
-    # Комментарии
-    store_notes = models.TextField(blank=True, verbose_name='Комментарий магазина')
-    partner_notes = models.TextField(blank=True, verbose_name='Комментарий партнёра')
-
-    class Meta:
-        db_table = 'store_requests'
-        verbose_name = 'Запрос товаров'
-        verbose_name_plural = 'Запросы товаров'
-        ordering = ['-requested_at']
-
-    def __str__(self):
-        return f"Запрос #{self.id} от {self.store.store_name}"
-
-    @property
-    def total_items(self):
-        """Общее количество позиций"""
-        return self.items.count()
-
-    @property
-    def total_quantity(self):
-        """Общее количество товаров"""
-        total = self.items.aggregate(
-            total=models.Sum('quantity')
-        )['total']
-        return total or Decimal('0')
-
-    def can_be_cancelled(self):
-        """Можно ли отменить запрос"""
-        return self.status in ['pending', 'approved']
-
-    def can_be_approved(self):
-        """Можно ли одобрить запрос"""
-        return self.status == 'pending'
+    def check_stock(self, quantity):
+        """Проверка достаточности на складе"""
+        if self.quantity < quantity:
+            raise ValidationError(f"Недостаточно товара: {self.product.name}. Доступно: {self.quantity}")
 
 
 class PartnerInventory(models.Model):
-    """Инвентарь партнёра (виртуальный склад)"""
-
+    """Инвентарь партнёра (личный склад партнёра)"""
     partner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='partner_inventory',
         limit_choices_to={'role': 'partner'},
+        related_name='inventory',
         verbose_name='Партнёр'
     )
     product = models.ForeignKey(
         'products.Product',
         on_delete=models.CASCADE,
-        related_name='partner_inventory',
         verbose_name='Товар'
     )
     quantity = models.DecimalField(
         max_digits=10,
-        decimal_places=3,
+        decimal_places=2,
         default=Decimal('0'),
         validators=[MinValueValidator(Decimal('0'))],
         verbose_name='Количество'
-    )
-    reserved_quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Зарезервировано'
     )
     last_updated = models.DateTimeField(auto_now=True, verbose_name='Последнее обновление')
 
     class Meta:
         db_table = 'partner_inventory'
         verbose_name = 'Инвентарь партнёра'
-        verbose_name_plural = 'Инвентари партнёров'
+        verbose_name_plural = 'Инвентарь партнёров'
         unique_together = ['partner', 'product']
-        ordering = ['partner', 'product']
 
     def __str__(self):
-        return f"{self.partner.get_full_name()} - {self.product.name}: {self.available_quantity}"
+        return f"{self.partner.name} - {self.product.name}: {self.quantity}"
 
-    @property
-    def available_quantity(self):
-        """Доступное количество"""
-        return self.quantity - self.reserved_quantity
+    def check_stock(self, quantity):
+        """Проверка достаточности на складе"""
+        if self.quantity < quantity:
+            raise ValidationError(f"Недостаточно товара: {self.product.name}. Доступно: {self.quantity}")
 
 
-# apps/stores/models.py - исправляем AdminInventory
-class AdminInventory(models.Model):
-    """Позиции в запросе товаров (переименованная модель)"""
-
-    request = models.ForeignKey(
-        StoreRequest,
+class ReturnRequest(models.Model):
+    partner = models.ForeignKey(  # <-- Add this field
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='items',  # оставляем как есть
+        related_name='partner_return_requests',  # Unique related_name to avoid conflicts with store's
+        limit_choices_to={'role': 'partner'},  # Optional: Restrict to partner users
+        verbose_name='Партнер',
+        null = True,  # <-- Добавьте это
+        blank = True
+    )
+    store = models.ForeignKey(
+        'stores.Store',
+        on_delete=models.CASCADE,
+        related_name='return_requests',
+        verbose_name='Магазин'
+    )
+    order = models.ForeignKey(
+        'orders.Order',
+        on_delete=models.CASCADE,
+        related_name='return_requests',
+        verbose_name='Заказ',
+        null=True,
+        blank=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Ожидает'), ('approved', 'Подтвержден'), ('rejected', 'Отклонен')],
+        default='pending',
+        verbose_name='Статус'
+    )
+    total_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Общая сумма возврата'
+    )
+    reason = models.TextField(blank=True, verbose_name='Причина')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    class Meta:
+        db_table = 'return_requests'
+        verbose_name = 'Запрос на возврат'
+        verbose_name_plural = 'Запросы на возврат'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Возврат {self.id} для {self.store.name}"
+
+
+class ReturnRequestItem(models.Model):
+    """Позиция в запросе на возврат"""
+    request = models.ForeignKey(
+        ReturnRequest,
+        on_delete=models.CASCADE,
+        related_name='items',
         verbose_name='Запрос'
     )
     product = models.ForeignKey(
         'products.Product',
         on_delete=models.CASCADE,
-        related_name='request_items',
         verbose_name='Товар'
     )
     quantity = models.DecimalField(
         max_digits=10,
-        decimal_places=3,
-        validators=[MinValueValidator(Decimal('0.001'))],
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.1'))],
         verbose_name='Количество'
     )
-
-    # Дополнительные поля для обработки
-    approved_quantity = models.DecimalField(
+    price = models.DecimalField(
         max_digits=10,
-        decimal_places=3,
-        null=True,
-        blank=True,
+        decimal_places=2,
         validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Одобренное количество'
-    )
-    delivered_quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=3,
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Доставленное количество'
+        verbose_name='Цена за единицу'
     )
 
     class Meta:
-        db_table = 'store_request_items'
-        verbose_name = 'Позиция запроса'
-        verbose_name_plural = 'Позиции запросов'
-        unique_together = ['request', 'product']
+        db_table = 'return_request_items'
+        verbose_name = 'Позиция возврата'
+        verbose_name_plural = 'Позиции возвратов'
 
     def __str__(self):
-        return f"{self.product.name} x {self.quantity}"
+        return f"{self.product.name}: {self.quantity} ({self.request.id})"
 
     @property
-    def final_quantity(self):
-        """Итоговое количество"""
-        return self.delivered_quantity or self.approved_quantity or self.quantity
-
-
-# apps/stores/models.py - добавляем новую модель для главного склада
-class MainInventory(models.Model):
-    """Главный склад администратора"""
-
-    product = models.OneToOneField(
-        'products.Product',
-        on_delete=models.CASCADE,
-        related_name='main_inventory',
-        verbose_name='Товар'
-    )
-    quantity = models.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Количество на главном складе'
-    )
-    reserved_for_partners = models.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Зарезервировано для партнёров'
-    )
-    last_updated = models.DateTimeField(auto_now=True, verbose_name='Последнее обновление')
-
-    class Meta:
-        db_table = 'main_inventory'
-        verbose_name = 'Главный склад'
-        verbose_name_plural = 'Главный склад'
-
-    def __str__(self):
-        return f"Главный склад - {self.product.name}: {self.available_quantity}"
-
-    @property
-    def available_quantity(self):
-        """Доступное для выдачи партнёрам"""
-        return self.quantity - self.reserved_for_partners
+    def total(self):
+        return self.quantity * self.price

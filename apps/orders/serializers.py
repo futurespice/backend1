@@ -1,155 +1,102 @@
 from rest_framework import serializers
-from .models import Order, OrderItem, ProductRequest, ProductRequestItem
-from drf_spectacular.utils import extend_schema_field
+from .models import Order, OrderItem, OrderHistory, OrderReturn, OrderReturnItem
+from stores.serializers import StoreSerializer
+from decimal import Decimal
+from products.models import Product
+from stores.models import Store
+
 
 class OrderItemSerializer(serializers.ModelSerializer):
-    """Сериализатор позиции заказа"""
-
     product_name = serializers.CharField(source='product.name', read_only=True)
-    unit = serializers.CharField(source='product.unit', read_only=True)
+    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
 
     class Meta:
         model = OrderItem
-        fields = [
-            'id', 'product', 'product_name', 'quantity', 'unit',
-            'unit_price', 'total_price', 'bonus_quantity', 'bonus_discount'
-        ]
-        read_only_fields = ['unit_price', 'total_price', 'bonus_quantity', 'bonus_discount']
+        fields = ['id', 'product', 'product_name', 'product_unit', 'quantity', 'price', 'total']
+        read_only_fields = ['price', 'total']
+
+    def validate_quantity(self, value):
+        product_id = self.initial_data.get('product')
+        if product_id:
+            product = Product.objects.get(id=product_id)
+            if product.category == 'weight':
+                if value % Decimal('0.1') != 0:
+                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1 кг")
+                if value < Decimal('0.1'):
+                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1 кг")
+            elif not value.is_integer():
+                raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
+        return value
 
 
-# apps/orders/serializers.py
+class CreateOrderSerializer(serializers.Serializer):
+    store = serializers.PrimaryKeyRelatedField(queryset=Store.objects.all())
+    note = serializers.CharField(max_length=500, allow_blank=True)
+    items = OrderItemSerializer(many=True)
+    idempotency_key = serializers.UUIDField()
+
+    def validate(self, attrs):
+        items = attrs.get('items')
+        if not items:
+            raise serializers.ValidationError("Необходимо указать хотя бы одну позицию")
+        return attrs
+
+
 class OrderSerializer(serializers.ModelSerializer):
-    """Сериализатор заказа"""
-
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
-    partner_name = serializers.CharField(source='store.partner.get_full_name', read_only=True)  # изменили путь
+    store = StoreSerializer(read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
-    items_count = serializers.SerializerMethodField()
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
 
     class Meta:
         model = Order
-        fields = [
-            'id', 'store', 'store_name', 'partner_name',  # убрали partner
-            'status', 'order_date', 'confirmed_date', 'completed_date',
-            'subtotal', 'bonus_discount', 'total_amount',
-            'payment_amount', 'debt_amount', 'bonus_items_count',
-            'items', 'items_count', 'notes'
-        ]
-        read_only_fields = [
-            'order_date', 'confirmed_date', 'completed_date',
-            'subtotal', 'bonus_discount', 'total_amount', 'debt_amount'
-        ]
-
-    @extend_schema_field({"type": "integer"})
-    def get_items_count(self, obj) -> int:
-        return obj.items.count()
+        fields = ['id', 'store', 'partner', 'partner_name', 'total_amount', 'debt_increase', 'status', 'note', 'items', 'idempotency_key', 'created_at', 'updated_at']
+        read_only_fields = ['partner', 'total_amount', 'debt_increase', 'idempotency_key', 'created_at', 'updated_at']
 
 
-class OrderCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор создания заказа"""
-
-    items = OrderItemSerializer(many=True, write_only=True)
+class OrderHistorySerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    product_name = serializers.CharField(source='product.name', read_only=True, allow_null=True)
 
     class Meta:
-        model = Order
-        fields = ['payment_amount', 'notes', 'items']  # убрали partner
-
-    def validate_items(self, value):
-        if not value:
-            raise serializers.ValidationError("Список товаров не может быть пустым")
-
-        # Проверяем уникальность товаров
-        product_ids = [item['product'].id for item in value]
-        if len(product_ids) != len(set(product_ids)):
-            raise serializers.ValidationError("Товары в заказе должны быть уникальными")
-
-        return value
-
-    def create(self, validated_data):
-        items_data = validated_data.pop('items')
-
-        # Получаем магазин из текущего пользователя
-        store = self.context['request'].user.store_profile
-        validated_data['store'] = store
-
-        # Создаём заказ
-        order = Order.objects.create(**validated_data)
-
-        # Создаём позиции и рассчитываем бонусы
-        for item_data in items_data:
-            item = OrderItem.objects.create(order=order, **item_data)
-            item.calculate_bonus_discount()
-
-        # Пересчитываем итоги заказа
-        order.calculate_totals()
-
-        return order
+        model = OrderHistory
+        fields = ['id', 'order_id', 'type', 'amount', 'quantity', 'product', 'product_name', 'note', 'created_at']
 
 
-class ProductRequestItemSerializer(serializers.ModelSerializer):
-    """Сериализатор позиции запроса товаров"""
-
+class OrderReturnItemSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    unit = serializers.CharField(source='product.unit', read_only=True)
+    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
 
     class Meta:
-        model = ProductRequestItem
-        fields = ['id', 'product', 'product_name', 'requested_quantity', 'unit']
+        model = OrderReturnItem
+        fields = ['id', 'product', 'product_name', 'product_unit', 'quantity', 'price', 'total']
+        read_only_fields = ['price', 'total']
 
-
-class ProductRequestSerializer(serializers.ModelSerializer):
-    """Сериализатор запроса товаров"""
-
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    items = ProductRequestItemSerializer(many=True, read_only=True)
-    items_count = serializers.SerializerMethodField()
-
-    class Meta:
-        model = ProductRequest
-        fields = [
-            'id', 'partner', 'partner_name', 'status',
-            'requested_at', 'reviewed_at',
-            'partner_notes', 'admin_notes',
-            'items', 'items_count'
-        ]
-        read_only_fields = ['requested_at', 'reviewed_at']
-
-    def get_items_count(self, obj):
-        return obj.items.count()
-
-
-class ProductRequestCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор создания запроса товаров"""
-
-    items = ProductRequestItemSerializer(many=True, write_only=True)
-
-    class Meta:
-        model = ProductRequest
-        fields = ['partner_notes', 'items']
-
-    def validate_items(self, value):
-        if not value:
-            raise serializers.ValidationError("Список товаров не может быть пустым")
-
-        # Проверяем уникальность товаров
-        product_ids = [item['product'].id for item in value]
-        if len(product_ids) != len(set(product_ids)):
-            raise serializers.ValidationError("Товары в запросе должны быть уникальными")
-
+    def validate_quantity(self, value):
+        product_id = self.initial_data.get('product')
+        if product_id:
+            product = Product.objects.get(id=product_id)
+            if product.category == 'weight':
+                if value % Decimal('0.1') != 0:
+                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1 кг")
+                if value < Decimal('0.1'):
+                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1 кг")
+            elif not value.is_integer():
+                raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
         return value
 
-    def create(self, validated_data):
-        items_data = validated_data.pop('items')
 
-        # Получаем партнёра из текущего пользователя
-        partner = self.context['request'].user
-        validated_data['partner'] = partner
+class CreateOrderReturnSerializer(serializers.Serializer):
+    order = serializers.PrimaryKeyRelatedField(queryset=Order.objects.all())
+    reason = serializers.CharField(max_length=500, allow_blank=True)
+    items = OrderReturnItemSerializer(many=True)
+    idempotency_key = serializers.UUIDField()
 
-        # Создаём запрос
-        request = ProductRequest.objects.create(**validated_data)
 
-        # Создаём позиции
-        for item_data in items_data:
-            ProductRequestItem.objects.create(request=request, **item_data)
+class OrderReturnSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    items = OrderReturnItemSerializer(many=True, read_only=True)
 
-        return request
+    class Meta:
+        model = OrderReturn
+        fields = ['id', 'order_id', 'status', 'total_amount', 'reason', 'items', 'idempotency_key', 'created_at']
+        read_only_fields = ['total_amount', 'idempotency_key', 'created_at']

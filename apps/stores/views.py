@@ -1,320 +1,397 @@
-from rest_framework import status, generics, viewsets, filters
-from rest_framework.response import Response
+from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q, Prefetch
-from django.shortcuts import get_object_or_404
+from rest_framework import filters
+from django.db.models import Q, Sum, F
+from django.db import transaction
+from decimal import Decimal
+from datetime import datetime
 
-from .models import Store, StoreInventory,StoreRequest
-from .serializers import (
-    StoreSerializer, StoreCreateUpdateSerializer, StoreProfileSerializer,
-    StoreInventorySerializer, StoreRequestSerializer, StoreRequestCreateSerializer,
-    StoreRequestUpdateSerializer, ProductCatalogSerializer
+from products.serializers import BonusHistorySerializer, DefectiveProductSerializer
+from .models import (
+    Region, City, Store, StoreSelection,
+    StoreProductRequest, StoreRequest, StoreRequestItem,
+    StoreInventory, PartnerInventory, ReturnRequest, ReturnRequestItem
 )
+from .serializers import (
+    RegionSerializer, StoreSerializer, StoreSelectionSerializer,
+    StoreProductRequestSerializer, CreateStoreRequestSerializer,
+    StoreRequestSerializer, StoreInventorySerializer,
+    PartnerInventorySerializer, ReturnRequestSerializer
+)
+from .services import StoreRequestService, InventoryService
 from users.permissions import IsAdminUser, IsPartnerUser, IsStoreUser
-from products.models import Product
+from products.models import Product, BonusHistory, DefectiveProduct
+from .filters import StoreFilter
+
+
+class RegionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Регионы и города"""
+    queryset = Region.objects.all().prefetch_related('cities')
+    serializer_class = RegionSerializer
+    permission_classes = [IsAuthenticated]
 
 
 class StoreViewSet(viewsets.ModelViewSet):
-    """ViewSet для управления магазинами"""
-
-    queryset = Store.objects.select_related('user', 'partner', 'region').all()
+    """
+    Магазины (CRUD)
+    - GET /stores/ - список магазинов (все роли)
+    - POST /stores/ - создать магазин (ADMIN, STORE)
+    - GET /stores/{id}/ - детали магазина
+    - PATCH /stores/{id}/ - обновить магазин (ADMIN)
+    - DELETE /stores/{id}/ - удалить магазин (ADMIN)
+    """
+    queryset = Store.objects.select_related('region', 'city', 'created_by')
+    serializer_class = StoreSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['region', 'partner', 'is_active']
-    search_fields = ['store_name', 'address', 'user__name', 'user__email']
-    ordering_fields = ['created_at', 'store_name']
+    filterset_class = StoreFilter
+    search_fields = ['name', 'inn', 'owner_name', 'phone']
+    ordering_fields = ['created_at', 'name', 'debt']
     ordering = ['-created_at']
 
-    def get_serializer_class(self):
-        if self.action in ['create', 'update', 'partial_update']:
-            return StoreCreateUpdateSerializer
-        return StoreSerializer
-
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAdminUser()]
-        elif self.action in ['list']:
-            return [IsAdminUser() or IsPartnerUser()]
+        """ADMIN и STORE могут создавать магазины"""
+        if self.action == 'create':
+            return [IsAuthenticated()]
+        elif self.action in ['update', 'partial_update', 'destroy', 'approve', 'reject', 'freeze', 'unfreeze', 'repay_debt']:
+            return [IsAuthenticated(), IsAdminUser()]
         return [IsAuthenticated()]
 
+    def perform_create(self, serializer):
+        """Создание магазина с pending статусом"""
+        serializer.save(created_by=self.request.user, approval_status='pending')
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Одобрить магазин"""
+        store = self.get_object()
+        store.approval_status = 'approved'
+        store.is_active = True
+        store.save()
+        return Response({'status': 'approved'})
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Отклонить магазин"""
+        store = self.get_object()
+        store.approval_status = 'rejected'
+        store.is_active = False
+        store.save()
+        return Response({'status': 'rejected'})
+
+    @action(detail=True, methods=['post'])
+    def freeze(self, request, pk=None):
+        """Заморозить магазин"""
+        store = self.get_object()
+        store.is_active = False
+        store.save()
+        return Response({'status': 'frozen'})
+
+    @action(detail=True, methods=['post'])
+    def unfreeze(self, request, pk=None):
+        """Разморозить магазин"""
+        store = self.get_object()
+        store.is_active = True
+        store.save()
+        return Response({'status': 'unfrozen'})
+
+    @action(detail=True, methods=['post'])
+    def repay_debt(self, request, pk=None):
+        """Погасить долг магазина"""
+        store = self.get_object()
+        amount = Decimal(request.data.get('amount', 0))
+        if amount <= 0 or amount > store.debt:
+            return Response({'error': 'Недопустимая сумма'}, status=status.HTTP_400_BAD_REQUEST)
+        store.debt -= amount
+        store.save()
+        return Response({'status': 'debt_updated', 'new_debt': store.debt})
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        """История заказов, бонусов и брака"""
+        store = self.get_object()
+        requests = StoreRequest.objects.filter(store=store).select_related('created_by')
+        bonuses = BonusHistory.objects.filter(store=store).select_related('product', 'partner')
+        defects = DefectiveProduct.objects.filter(partner__in=StoreSelection.objects.filter(store=store).values('user')).select_related('product')
+
+        return Response({
+            'requests': StoreRequestSerializer(requests, many=True).data,
+            'bonuses': BonusHistorySerializer(bonuses, many=True).data,
+            'defects': DefectiveProductSerializer(defects, many=True).data
+        })
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """Статистика по магазинам"""
+        queryset = self.get_queryset()
+        total_debt = queryset.aggregate(Sum('debt'))['debt__sum'] or 0
+        total_stores = queryset.count()
+        active_stores = queryset.filter(is_active=True).count()
+        return Response({
+            'total_debt': total_debt,
+            'total_stores': total_stores,
+            'active_stores': active_stores
+        })
+
     def get_queryset(self):
-        qs = super().get_queryset()
         user = self.request.user
-
-        if user.role == 'partner':
-            # Партнёр видит только свои магазины
-            qs = qs.filter(partner=user)
+        if user.role == 'admin':
+            return Store.objects.all()
         elif user.role == 'store':
-            # Магазин видит только себя
-            qs = qs.filter(user=user)
+            try:
+                selection = StoreSelection.objects.get(user=user)
+                return Store.objects.filter(id=selection.store.id)
+            except StoreSelection.DoesNotExist:
+                return Store.objects.none()
+        return Store.objects.filter(approval_status='approved', is_active=True)
 
-        return qs
 
-    @action(detail=False, methods=['get'], permission_classes=[IsStoreUser])
-    def my_profile(self, request):
-        """Профиль текущего магазина"""
+class StoreSelectionViewSet(viewsets.ModelViewSet):
+    """
+    Выбор магазина пользователем (роль STORE)
+    - GET /selection/ - текущий выбор
+    - POST /selection/ - выбрать магазин
+    """
+    serializer_class = StoreSelectionSerializer
+    permission_classes = [IsAuthenticated, IsStoreUser]
+
+    def get_queryset(self):
+        return StoreSelection.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class StoreProductRequestViewSet(viewsets.ModelViewSet):
+    """
+    Запросы на товары магазина (без влияния на инвентарь)
+    - GET /product-requests/ - список запросов
+    - POST /product-requests/ - создать запрос
+    """
+    serializer_class = StoreProductRequestSerializer
+    permission_classes = [IsAuthenticated, IsStoreUser]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'admin':
+            return StoreProductRequest.objects.all()
         try:
-            store = request.user.store_profile
-            serializer = StoreProfileSerializer(store)
-            return Response(serializer.data)
-        except Store.DoesNotExist:
-            return Response(
-                {'error': 'Профиль магазина не найден'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            selection = StoreSelection.objects.get(user=user)
+            return StoreProductRequest.objects.filter(store=selection.store)
+        except StoreSelection.DoesNotExist:
+            return StoreProductRequest.objects.none()
 
-    @action(detail=False, methods=['patch'], permission_classes=[IsStoreUser])
-    def update_profile(self, request):
-        """Обновление профиля магазина"""
-        try:
-            store = request.user.store_profile
-            serializer = StoreProfileSerializer(store, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            return Response(serializer.data)
-        except Store.DoesNotExist:
-            return Response(
-                {'error': 'Профиль магазина не найден'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-    @action(detail=True, methods=['get'], permission_classes=[IsAdminUser])
-    def inventory(self, request, pk=None):
-        """Остатки товаров в магазине"""
-        store = self.get_object()
-        inventory = StoreInventory.objects.filter(store=store).select_related('product')
-        serializer = StoreInventorySerializer(inventory, many=True)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['patch'], permission_classes=[IsAdminUser])
-    def assign_partner(self, request, pk=None):
-        """Назначить партнёра магазину"""
-        store = self.get_object()
-        partner_id = request.data.get('partner_id')
-
-        if not partner_id:
-            return Response(
-                {'error': 'partner_id обязателен'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        try:
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
-            partner = User.objects.get(id=partner_id, role='partner')
-            store.partner = partner
-            store.save()
-
-            serializer = StoreSerializer(store)
-            return Response({
-                'message': f'Партнёр {partner.get_full_name()} назначен магазину {store.store_name}',
-                'store': serializer.data
-            })
-
-        except User.DoesNotExist:
-            return Response(
-                {'error': 'Партнёр не найден'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+    def perform_create(self, serializer):
+        selection = StoreSelection.objects.get(user=self.request.user)
+        serializer.save(store=selection.store)
 
 
 class StoreRequestViewSet(viewsets.ModelViewSet):
-    """ViewSet для запросов товаров от магазинов"""
-
-    queryset = StoreRequest.objects.select_related('store', 'partner').prefetch_related(
-        Prefetch('items', queryset=StoreRequest.objects.select_related('product'))
-    ).all()
+    """
+    История запросов магазина
+    - GET /requests/ - список запросов
+    - POST /requests/ - создать запрос
+    - POST /requests/{id}/approve/ - подтвердить
+    - POST /requests/{id}/reject/ - отклонить
+    - POST /requests/{id}/cancel-item/ - отменить позицию
+    """
+    serializer_class = StoreRequestSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['status', 'store', 'partner']
-    ordering_fields = ['requested_at', 'processed_at']
-    ordering = ['-requested_at']
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return StoreRequestCreateSerializer
-        elif self.action in ['update', 'partial_update']:
-            return StoreRequestUpdateSerializer
-        return StoreRequestSerializer
 
     def get_permissions(self):
-        if self.action == 'create':
-            return [IsStoreUser()]
-        elif self.action in ['update', 'partial_update']:
-            return [IsPartnerUser()]
+        if self.action in ['approve', 'reject']:
+            return [IsAuthenticated(), IsAdminUser()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = super().get_queryset()
         user = self.request.user
+        if user.role == 'admin':
+            return StoreRequest.objects.all()
+        elif user.role == 'store':
+            try:
+                selection = StoreSelection.objects.get(user=user)
+                return StoreRequest.objects.filter(store=selection.store)
+            except StoreSelection.DoesNotExist:
+                return StoreRequest.objects.none()
+        return StoreRequest.objects.none()
 
-        if user.role == 'store':
-            # Магазин видит только свои запросы
-            qs = qs.filter(store__user=user)
-        elif user.role == 'partner':
-            # Партнёр видит запросы от своих магазинов
-            qs = qs.filter(partner=user)
+    def create(self, request, *args, **kwargs):
+        serializer = CreateStoreRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            selection = StoreSelection.objects.get(user=self.request.user)
+            store = selection.store
+            if store.approval_status != 'approved':
+                return Response({'error': 'Магазин не одобрен'}, status=status.HTTP_403_FORBIDDEN)
+            request_obj = StoreRequestService.create_request(
+                store=store,
+                created_by=self.request.user,
+                items_data=serializer.validated_data['items'],
+                note=serializer.validated_data.get('note', '')
+            )
+            return Response(StoreRequestSerializer(request_obj).data, status=status.HTTP_201_CREATED)
+        except StoreSelection.DoesNotExist:
+            return Response({'error': 'Магазин не выбран'}, status=status.HTTP_400_BAD_REQUEST)
 
-        return qs
-
-    @action(detail=True, methods=['patch'], permission_classes=[IsPartnerUser])
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        """Одобрить запрос"""
-        request_obj = self.get_object()
+        """Подтвердить запрос"""
+        store_request = self.get_object()
+        if store_request.status != 'pending':
+            return Response({'error': 'Запрос уже обработан'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if request_obj.status != 'pending':
-            return Response(
-                {'error': 'Можно одобрить только ожидающие запросы'},
-                status=status.HTTP_400_BAD_REQUEST
+        for item in store_request.items.filter(is_cancelled=False):
+            InventoryService.transfer_to_store(
+                partner=store_request.created_by,
+                store=store_request.store,
+                product=item.product,
+                quantity=item.quantity
             )
 
-        request_obj.approve(request.user)
-        serializer = StoreRequestSerializer(request_obj)
+        store_request.status = 'approved'
+        store_request.save()
+        return Response({'status': 'approved'})
 
-        return Response({
-            'message': 'Запрос одобрен',
-            'request': serializer.data
-        })
-
-    @action(detail=True, methods=['patch'], permission_classes=[IsPartnerUser])
+    @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Отклонить запрос"""
-        request_obj = self.get_object()
+        store_request = self.get_object()
+        if store_request.status != 'pending':
+            return Response({'error': 'Запрос уже обработан'}, status=status.HTTP_400_BAD_REQUEST)
+        store_request.status = 'rejected'
+        store_request.save()
+        return Response({'status': 'rejected'})
 
-        if request_obj.status != 'pending':
-            return Response(
-                {'error': 'Можно отклонить только ожидающие запросы'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        reason = request.data.get('reason', '')
-        request_obj.reject(request.user, reason)
-        serializer = StoreRequestSerializer(request_obj)
-
-        return Response({
-            'message': 'Запрос отклонён',
-            'request': serializer.data
-        })
-
-    @action(detail=False, methods=['get'], permission_classes=[IsStoreUser])
-    def my_requests(self, request):
-        """Мои запросы (для магазинов)"""
+    @action(detail=True, methods=['post'])
+    def cancel_item(self, request, pk=None):
+        """Отменить позицию в запросе"""
+        store_request = self.get_object()
+        item_id = request.data.get('item_id')
         try:
-            store = request.user.store_profile
-            requests = self.get_queryset().filter(store=store)
-
-            # Фильтрация по статусу
-            status_filter = request.query_params.get('status')
-            if status_filter:
-                requests = requests.filter(status=status_filter)
-
-            page = self.paginate_queryset(requests)
-            if page is not None:
-                serializer = StoreRequestSerializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
-
-            serializer = StoreRequestSerializer(requests, many=True)
-            return Response(serializer.data)
-
-        except Store.DoesNotExist:
-            return Response(
-                {'error': 'Профиль магазина не найден'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-    @action(detail=False, methods=['get'], permission_classes=[IsPartnerUser])
-    def partner_requests(self, request):
-        """Запросы партнёра"""
-        requests = self.get_queryset().filter(partner=request.user)
-
-        # Фильтрация по статусу
-        status_filter = request.query_params.get('status')
-        if status_filter:
-            requests = requests.filter(status=status_filter)
-
-        page = self.paginate_queryset(requests)
-        if page is not None:
-            serializer = StoreRequestSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = StoreRequestSerializer(requests, many=True)
-        return Response(serializer.data)
-
-
-class ProductCatalogView(generics.ListAPIView):
-    """Каталог товаров для магазинов"""
-
-    queryset = Product.objects.filter(is_active=True).select_related('category')
-    serializer_class = ProductCatalogSerializer
-    permission_classes = [IsStoreUser]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['category']
-    search_fields = ['name', 'description']
-    ordering_fields = ['name', 'price', 'created_at']
-    ordering = ['name']
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-
-        # Фильтрация по партнёру (если магазин привязан к партнёру)
-        try:
-            store = self.request.user.store_profile
-            if store.partner:
-                # Здесь можно добавить логику фильтрации по товарам партнёра
-                pass
-        except Store.DoesNotExist:
-            pass
-
-        return qs
+            item = store_request.items.get(id=item_id)
+            StoreRequestService.cancel_item(item)
+            return Response(StoreRequestSerializer(store_request).data)
+        except StoreRequestItem.DoesNotExist:
+            return Response({'error': 'Позиция не найдена'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class StoreInventoryViewSet(viewsets.ReadOnlyModelViewSet):
-    """Остатки товаров в магазине (только чтение)"""
-
-    queryset = StoreInventory.objects.select_related('store', 'product').all()
+    """
+    Инвентарь магазина
+    - GET /inventory/ - список товаров
+    - GET /inventory/?store={id} - фильтр по магазину
+    """
     serializer_class = StoreInventorySerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['store', 'product']
     search_fields = ['product__name']
-
-    def get_permissions(self):
-        if self.action == 'list':
-            return [IsAdminUser() or IsPartnerUser()]
-        return [IsAuthenticated()]
+    ordering_fields = ['quantity', 'last_updated']
+    ordering = ['-last_updated']
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        """Фильтрация по роли"""
         user = self.request.user
-
-        if user.role == 'partner':
-            # Партнёр видит остатки своих магазинов
-            qs = qs.filter(store__partner=user)
+        if user.role == 'admin':
+            return StoreInventory.objects.select_related('store', 'product').filter(quantity__gt=0)
+        elif user.role == 'partner':
+            return StoreInventory.objects.select_related('store', 'product').filter(quantity__gt=0)
         elif user.role == 'store':
-            # Магазин видит только свои остатки
-            qs = qs.filter(store__user=user)
+            try:
+                selection = StoreSelection.objects.get(user=user)
+                return StoreInventory.objects.filter(
+                    store=selection.store,
+                    quantity__gt=0
+                ).select_related('product')
+            except StoreSelection.DoesNotExist:
+                return StoreInventory.objects.none()
+        return StoreInventory.objects.none()
 
-        return qs
 
-    @action(detail=False, methods=['get'], permission_classes=[IsStoreUser])
-    def my_inventory(self, request):
-        """Мои остатки (для магазина)"""
-        try:
-            store = request.user.store_profile
-            inventory = self.get_queryset().filter(store=store)
+class PartnerInventoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Инвентарь партнёра (личный склад партнёра)
+    - GET /partner-inventory/ - список товаров партнёра
+    """
+    serializer_class = PartnerInventorySerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['product']
+    search_fields = ['product__name']
+    ordering_fields = ['quantity', 'last_updated']
+    ordering = ['-last_updated']
 
-            page = self.paginate_queryset(inventory)
-            if page is not None:
-                serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
+    def get_queryset(self):
+        """Фильтрация по роли"""
+        user = self.request.user
+        if user.role == 'admin':
+            return PartnerInventory.objects.select_related('partner', 'product').filter(quantity__gt=0)
+        elif user.role == 'partner':
+            return PartnerInventory.objects.filter(
+                partner=user,
+                quantity__gt=0
+            ).select_related('product')
+        return PartnerInventory.objects.none()
 
-            serializer = self.get_serializer(inventory, many=True)
-            return Response(serializer.data)
 
-        except Store.DoesNotExist:
-            return Response(
-                {'error': 'Профиль магазина не найден'},
-                status=status.HTTP_404_NOT_FOUND
+class ReturnRequestViewSet(viewsets.ModelViewSet):
+    """
+    Запросы на возврат товаров партнером
+    - GET /returns/ - список возвратов
+    - POST /returns/ - создать возврат
+    - POST /returns/{id}/approve/ - подтвердить
+    - POST /returns/{id}/reject/ - отклонить
+    """
+    serializer_class = ReturnRequestSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['approve', 'reject']:
+            return [IsAuthenticated(), IsAdminUser()]
+        return [IsAuthenticated(), IsPartnerUser()]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'admin':
+            return ReturnRequest.objects.all()
+        return ReturnRequest.objects.filter(partner=user)
+
+    def perform_create(self, serializer):
+        serializer.save(partner=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    @transaction.atomic
+    def approve(self, request, pk=None):
+        """Подтвердить возврат"""
+        return_request = self.get_object()
+        if return_request.status != 'pending':
+            return Response({'error': 'Запрос уже обработан'}, status=status.HTTP_400_BAD_REQUEST)
+
+        for item in return_request.items.all():
+            InventoryService.remove_from_inventory(
+                partner=return_request.partner,
+                product=item.product,
+                quantity=item.quantity
             )
+            # Возвращаем на общий склад (products.Product)
+            product = item.product
+            product.stock_quantity += item.quantity
+            product.save()
+
+        return_request.status = 'approved'
+        return_request.save()
+        return Response({'status': 'approved'})
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Отклонить возврат"""
+        return_request = self.get_object()
+        if return_request.status != 'pending':
+            return Response({'error': 'Запрос уже обработан'}, status=status.HTTP_400_BAD_REQUEST)
+        return_request.status = 'rejected'
+        return_request.save()
+        return Response({'status': 'rejected'})
