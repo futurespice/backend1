@@ -24,14 +24,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем проект
 COPY . /app/
 
-# Создаем директории
-RUN mkdir -p /app/logs /app/staticfiles /app/media
+# Создаем директории с правами ДО смены пользователя
+RUN mkdir -p /app/logs /app/staticfiles /app/media \
+    && chmod -R 777 /app/logs /app/staticfiles /app/media
 
 # Права на файлы
 RUN chown -R django:django /app
 
-# Переключаемся на django пользователя
-USER django
+# НЕ переключаемся на django пользователя - работаем под root
+# USER django
 
 # Порт
 EXPOSE 8000
