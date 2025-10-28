@@ -62,7 +62,7 @@ urlpatterns = [
     path('api/auth/', include('users.urls')),
     path('api/products/', include('products.urls')),
     path('api/stores/', include('stores.urls')),
-    # path('api/orders/', include('orders.urls')),
+    path('api/orders/', include('orders.urls')),
     # path('api/debts/', include('debts.urls')),
     # path('api/bonuses/', include('bonuses.urls')),
     # path('api/cost-accounting/', include('cost_accounting.urls')),

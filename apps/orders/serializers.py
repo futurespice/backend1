@@ -1,8 +1,8 @@
 from rest_framework import serializers
 from .models import Order, OrderItem, OrderHistory, OrderReturn, OrderReturnItem
 from stores.serializers import StoreSerializer
-from decimal import Decimal
-from products.models import Product
+from decimal import Decimal,ROUND_HALF_UP
+
 from stores.models import Store
 
 
@@ -15,18 +15,24 @@ class OrderItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'product_name', 'product_unit', 'quantity', 'price', 'total']
         read_only_fields = ['price', 'total']
 
-    def validate_quantity(self, value):
-        product_id = self.initial_data.get('product')
-        if product_id:
-            product = Product.objects.get(id=product_id)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1 кг")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1 кг")
-            elif not value.is_integer():
-                raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
+    def validate(self, attrs):
+        product = attrs.get('product')
+        quantity = attrs.get('quantity')
+        if not product or quantity is None:
+            return attrs
+
+        if product.category == "weight":
+            scaled = (quantity * Decimal("10")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            if scaled / Decimal("10") != quantity:
+                raise serializers.ValidationError(
+                    {"quantity": "Количество для весовых товаров должно быть кратно 0.1 кг"})
+            if quantity < Decimal("0.1"):
+                raise serializers.ValidationError({"quantity": "Минимальное количество для весовых товаров: 0.1 кг"})
+        else:
+            if quantity != quantity.to_integral_value(rounding=ROUND_HALF_UP):
+                raise serializers.ValidationError(
+                    {"quantity": "Количество для штучных товаров должно быть целым числом"})
+        return attrs
 
 
 class CreateOrderSerializer(serializers.Serializer):
@@ -71,18 +77,24 @@ class OrderReturnItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'product', 'product_name', 'product_unit', 'quantity', 'price', 'total']
         read_only_fields = ['price', 'total']
 
-    def validate_quantity(self, value):
-        product_id = self.initial_data.get('product')
-        if product_id:
-            product = Product.objects.get(id=product_id)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1 кг")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1 кг")
-            elif not value.is_integer():
-                raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
+    def validate(self, attrs):
+        product = attrs.get('product')
+        quantity = attrs.get('quantity')
+        if not product or quantity is None:
+            return attrs
+
+        if product.category == "weight":
+            scaled = (quantity * Decimal("10")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            if scaled / Decimal("10") != quantity:
+                raise serializers.ValidationError(
+                    {"quantity": "Количество для весовых товаров должно быть кратно 0.1 кг"})
+            if quantity < Decimal("0.1"):
+                raise serializers.ValidationError({"quantity": "Минимальное количество для весовых товаров: 0.1 кг"})
+        else:
+            if quantity != quantity.to_integral_value(rounding=ROUND_HALF_UP):
+                raise serializers.ValidationError(
+                    {"quantity": "Количество для штучных товаров должно быть целым числом"})
+        return attrs
 
 
 class CreateOrderReturnSerializer(serializers.Serializer):

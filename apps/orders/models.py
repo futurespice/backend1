@@ -8,6 +8,13 @@ import uuid
 
 
 class Order(models.Model):
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает"
+        CONFIRMED = "confirmed", "Подтвержден"
+        REJECTED = "rejected", "Отклонен"
+        CANCELLED = "cancelled", "Отменен"
+
     store = models.ForeignKey(
         'stores.Store',
         on_delete=models.CASCADE,
@@ -35,14 +42,9 @@ class Order(models.Model):
         validators=[MinValueValidator(Decimal('0'))],
         verbose_name='Увеличение долга'
     )
-    status = models.CharField(
-        max_length=20,
-        choices=[('pending', 'Ожидает'), ('confirmed', 'Подтвержден'), ('rejected', 'Отклонен'), ('cancelled', 'Отменен')],
-        default='pending',
-        verbose_name='Статус'
-    )
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     note = models.TextField(blank=True, verbose_name='Примечание')
-    idempotency_key = models.UUIDField(default=uuid.uuid4, unique=True, verbose_name='Ключ идемпотентности')
+    idempotency_key = models.UUIDField(default=uuid.uuid4, unique=True, verbose_name='Ключ идемпотентности',editable=False,)
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
 
@@ -83,9 +85,15 @@ class OrderItem(models.Model):
     )
 
     class Meta:
-        db_table = 'order_items'
-        verbose_name = 'Позиция заказа'
-        verbose_name_plural = 'Позиции заказов'
+        db_table = "order_items"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "product"],
+                name="uniq_order_product"
+            )
+        ]
+        verbose_name = "Позиция заказа"
+        verbose_name_plural = "Позиции заказов"
 
     def __str__(self):
         return f"{self.product.name}: {self.quantity} ({self.order.id})"
