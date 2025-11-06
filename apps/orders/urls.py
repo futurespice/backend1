@@ -1,11 +1,15 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import OrderViewSet, OrderHistoryViewSet, OrderReturnViewSet
+from .views import (
+    PartnerOrderViewSet, StoreOrderViewSet,
+    OrderHistoryViewSet, OrderReturnViewSet
+)
 
 router = DefaultRouter()
-router.register('orders', OrderViewSet, basename='orders')
-router.register('history', OrderHistoryViewSet, basename='history')
-router.register('returns', OrderReturnViewSet, basename='returns')
+router.register('partner-orders', PartnerOrderViewSet, basename='partner-order')
+router.register('store-orders', StoreOrderViewSet, basename='store-order')
+router.register('history', OrderHistoryViewSet, basename='order-history')
+router.register('returns', OrderReturnViewSet, basename='order-return')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -1,146 +1,157 @@
-# apps/orders/admin.py
-from decimal import Decimal
 from django.contrib import admin
-from django.db import transaction
 from django.utils.html import format_html
+from decimal import Decimal
 
-from .models import Order, OrderItem, OrderReturn, OrderReturnItem
+from .models import (
+    PartnerOrder, PartnerOrderItem,
+    StoreOrder, StoreOrderItem,
+    OrderHistory, OrderReturn, OrderReturnItem
+)
 
 
-# ---------- Inlines ----------
+# ============= PARTNER ORDERS (партнёр → админ) =============
 
-class OrderItemInline(admin.TabularInline):
-    model = OrderItem
-    extra = 0
-    fields = ("product", "quantity", "price", "line_total")
-    readonly_fields = ("line_total",)
+class PartnerOrderItemInline(admin.TabularInline):
+    model = PartnerOrderItem
+    extra = 1
+    readonly_fields = ['total_display']
+    fields = ['product', 'quantity', 'price', 'total_display']
 
-    @staticmethod
-    def line_total(obj):
-        if obj.quantity is None or obj.price is None:
-            return "-"
-        return f"{(obj.quantity * obj.price):.2f}"
+    def total_display(self, obj):
+        if obj.price and obj.quantity:
+            return f"{obj.total} сом"
+        return "—"
 
+    total_display.short_description = 'Итого'
+
+
+@admin.register(PartnerOrder)
+class PartnerOrderAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'partner', 'status', 'total_amount',
+        'created_at'
+    ]
+    list_filter = ['status', 'created_at']
+    search_fields = ['partner__name', 'partner__email']
+    readonly_fields = ['total_amount', 'idempotency_key', 'created_at', 'updated_at']
+    inlines = [PartnerOrderItemInline]
+
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('partner', 'status', 'total_amount', 'note')
+        }),
+        ('Системная информация', {
+            'fields': ('idempotency_key', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def get_queryset(self, request):
+        """N+1 защита"""
+        return super().get_queryset(request).select_related('partner')
+
+
+# ============= STORE ORDERS (магазин → партнёр) =============
+
+class StoreOrderItemInline(admin.TabularInline):
+    model = StoreOrderItem
+    extra = 1
+    readonly_fields = ['total_display']
+    fields = ['product', 'quantity', 'price', 'is_bonus', 'total_display']
+
+    def total_display(self, obj):
+        if obj.is_bonus:
+            return format_html('<span style="color: green;">БОНУС (0 сом)</span>')
+        if obj.price and obj.quantity:
+            return f"{obj.total} сом"
+        return "—"
+
+    total_display.short_description = 'Итого'
+
+
+@admin.register(StoreOrder)
+class StoreOrderAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'store', 'partner', 'is_fulfilled',
+        'total_amount', 'bonus_applied', 'created_at'
+    ]
+    list_filter = ['is_fulfilled', 'created_at']
+    search_fields = ['store__name', 'partner__name']
+    readonly_fields = ['total_amount', 'bonus_applied', 'idempotency_key', 'created_at', 'updated_at']
+    inlines = [StoreOrderItemInline]
+
+    fieldsets = (
+        ('Основная информация', {
+            'fields': ('store', 'partner', 'store_request', 'is_fulfilled')
+        }),
+        ('Суммы', {
+            'fields': ('total_amount', 'bonus_applied', 'note')
+        }),
+        ('Системная информация', {
+            'fields': ('idempotency_key', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def get_queryset(self, request):
+        """N+1 защита"""
+        return super().get_queryset(request).select_related('store', 'partner', 'store_request')
+
+
+# ============= ORDER HISTORY =============
+
+@admin.register(OrderHistory)
+class OrderHistoryAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'order_type', 'order_id', 'type',
+        'product', 'quantity', 'amount', 'created_at'
+    ]
+    list_filter = ['order_type', 'type', 'created_at']
+    search_fields = ['product__name', 'note']
+    readonly_fields = ['created_at']
+
+    def get_queryset(self, request):
+        """N+1 защита"""
+        return super().get_queryset(request).select_related('product')
+
+
+# ============= ORDER RETURNS =============
 
 class OrderReturnItemInline(admin.TabularInline):
     model = OrderReturnItem
-    extra = 0
-    fields = ("product", "quantity", "price", "line_total")
-    readonly_fields = ("line_total",)
+    extra = 1
+    readonly_fields = ['total_display']
+    fields = ['product', 'quantity', 'price', 'total_display']
 
-    @staticmethod
-    def line_total(obj):
-        if obj.quantity is None or obj.price is None:
-            return "-"
-        return f"{(obj.quantity * obj.price):.2f}"
+    def total_display(self, obj):
+        if obj.price and obj.quantity:
+            return f"{obj.total} сом"
+        return "—"
 
+    total_display.short_description = 'Итого'
 
-# ---------- Admin: Order ----------
-
-@admin.register(Order)
-class OrderAdmin(admin.ModelAdmin):
-    list_display = (
-        "id",
-        "store",
-        "partner",
-        "status_badge",
-        "total_amount_display",
-        "debt_increase_display",
-        "created_at",
-    )
-    list_filter = ("status", "created_at")
-    search_fields = ("store__name", "partner__username", "note")
-    ordering = ("-created_at",)
-    inlines = [OrderItemInline]
-    readonly_fields = ('idempotency_key', 'created_at', 'updated_at')
-
-    fieldsets = (
-        ("Участники", {"fields": ("store", "partner")}),
-        ("Статус", {"fields": ("status",)}),
-        ("Суммы", {"fields": ("total_amount", "debt_increase")}),
-        ("Комментарии", {"fields": ("note",)}),
-        ("Системные поля", {"fields": ("created_at",)}),
-    )
-
-    @transaction.atomic
-    def save_model(self, request, obj, form, change):
-        # НЕ вызываем сервисы, просто сохраняем
-        super().save_model(request, obj, form, change)
-
-    @transaction.atomic
-    def save_formset(self, request, form, formset, change):
-        instances = formset.save(commit=False)
-        for inst in instances:
-            inst.save()
-        formset.save_m2m()
-
-    @staticmethod
-    def status_badge(obj):
-        colors = {
-            "pending": "orange",
-            "confirmed": "blue",
-            "rejected": "red",
-        }
-        color = colors.get(str(obj.status).lower(), "black")
-        text = getattr(obj, "get_status_display", lambda: obj.status)()
-        return format_html('<span style="color:{}; font-weight:600">{}</span>', color, text)
-
-    @staticmethod
-    def total_amount_display(obj):
-        return f"{obj.total_amount:.2f}"
-
-    @admin.display(description="Изм. долга")
-    def debt_increase_display(self, obj):
-        val = obj.debt_increase or Decimal("0")
-        color = "red" if val > 0 else ("green" if val < 0 else "inherit")
-        val_str = f"{val:.2f}"  # форматируем число заранее
-        return format_html('<span style="color:{}">{}</span>', color, val_str)
-
-
-# ---------- Admin: OrderReturn ----------
 
 @admin.register(OrderReturn)
 class OrderReturnAdmin(admin.ModelAdmin):
-    list_display = (
-        "id",
-        "order",
-        "store_display",
-        "partner_display",
-        "status_badge",
-        "total_amount_display",
-        "created_at",
-    )
-    list_filter = ("status", "created_at")
-    search_fields = ("order__store__name", "order__partner__username", "reason")
-    ordering = ("-created_at",)
+    list_display = [
+        'id', 'order', 'status', 'total_amount',
+        'created_at'
+    ]
+    list_filter = ['status', 'created_at']
+    search_fields = ['order__store__name', 'reason']
+    readonly_fields = ['total_amount', 'idempotency_key', 'created_at', 'updated_at']
     inlines = [OrderReturnItemInline]
 
     fieldsets = (
-        ("Базовая информация", {"fields": ("order", "status", "reason")}),
-        ("Сумма", {"fields": ("total_amount",)}),
-        ("Системные поля", {"fields": ("created_at",)}),
+        ('Основная информация', {
+            'fields': ('order', 'status', 'total_amount', 'reason')
+        }),
+        ('Системная информация', {
+            'fields': ('idempotency_key', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
     )
-    readonly_fields = ("created_at",)
 
-    @staticmethod
-    def store_display(obj):
-        return getattr(obj.order, "store", None)
-
-    @staticmethod
-    def partner_display(obj):
-        return getattr(obj.order, "partner", None)
-
-    @staticmethod
-    def status_badge(obj):
-        colors = {
-            "pending": "orange",
-            "approved": "green",
-            "rejected": "red",
-        }
-        color = colors.get(str(obj.status).lower(), "black")
-        text = getattr(obj, "get_status_display", lambda: obj.status)()
-        return format_html('<span style="color:{}; font-weight:600">{}</span>', color, text)
-
-    @staticmethod
-    def total_amount_display(obj):
-        return f"{obj.total_amount:.2f}"
+    def get_queryset(self, request):
+        """N+1 защита"""
+        return super().get_queryset(request).select_related('order', 'order__store')

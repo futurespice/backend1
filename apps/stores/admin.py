@@ -1,45 +1,43 @@
+# apps/stores/admin.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from django.contrib import admin
 from django.utils.html import format_html
+from decimal import Decimal
 from .models import (
     Region, City, Store, StoreSelection,
     StoreProductRequest, StoreRequest, StoreRequestItem,
     StoreInventory, PartnerInventory, ReturnRequest, ReturnRequestItem
 )
-from django.db.models import Sum
 
 
 @admin.register(Region)
 class RegionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'name', 'code']
-    search_fields = ['name', 'code']
-    ordering = ['name']
+    list_display = ['id','name']
+    search_fields = ['name']
 
 
 @admin.register(City)
 class CityAdmin(admin.ModelAdmin):
-    list_display = ['id', 'name', 'region']
+    list_display = ['id','name', 'region']
     list_filter = ['region']
-    search_fields = ['name', 'region__name']
-    ordering = ['region', 'name']
+    search_fields = ['name']
 
 
 @admin.register(Store)
 class StoreAdmin(admin.ModelAdmin):
     list_display = [
-        'id', 'name_display', 'inn', 'owner_name', 'phone_display',
-        'city_display', 'debt_display', 'approval_status', 'is_active', 'created_at'
+        'name', 'inn', 'owner_name', 'phone',
+        'city', 'approval_status', 'debt', 'is_active'
     ]
-    list_filter = ['approval_status', 'is_active', 'region', 'city', 'created_at']
+    list_filter = ['approval_status', 'is_active', 'region', 'city']
     search_fields = ['name', 'inn', 'owner_name', 'phone']
-    readonly_fields = ['created_by', 'created_at', 'updated_at']
-    ordering = ['-created_at']
+    readonly_fields = ['debt', 'created_at', 'updated_at']
 
     fieldsets = (
         ('Основная информация', {
             'fields': ('name', 'inn', 'owner_name', 'phone')
         }),
         ('Местоположение', {
-            'fields': ('region', 'city', 'address', ('latitude', 'longitude'))
+            'fields': ('region', 'city', 'address', 'latitude', 'longitude')
         }),
         ('Финансы', {
             'fields': ('debt',)
@@ -48,155 +46,161 @@ class StoreAdmin(admin.ModelAdmin):
             'fields': ('approval_status', 'is_active')
         }),
         ('Системная информация', {
-            'fields': ('created_by', 'created_at', 'updated_at'),
-            'classes': ('collapse',)
+            'fields': ('created_by', 'created_at', 'updated_at')
         }),
     )
 
-    def name_display(self, obj):
-        return format_html('<strong>{}</strong>', obj.name)
 
-    name_display.short_description = 'Название'
+@admin.register(StoreSelection)
+class StoreSelectionAdmin(admin.ModelAdmin):
+    list_display = ['user', 'store', 'selected_at']
+    list_filter = ['selected_at']
+    search_fields = ['user__email', 'store__name']
 
-    def phone_display(self, obj):
-        return format_html('<span style="color: blue;">{}</span>', obj.phone)
 
-    phone_display.short_description = 'Телефон'
-
-    def city_display(self, obj):
-        return f"{obj.city.name} ({obj.region.name})"
-
-    city_display.short_description = 'Город'
-
-    def debt_display(self, obj):
-        if obj.debt <= 0:
-            return format_html('<span style="color: green;">0 сом</span>')
-        elif obj.debt < 10000:
-            return format_html('<span style="color: orange;">{} сом</span>', obj.debt)
-        return format_html('<span style="color: red;">{} сом</span>', obj.debt)
-
-    debt_display.short_description = 'Долг'
-
-    actions = ['approve_stores', 'reject_stores']
-
-    def approve_stores(self, request, queryset):
-        updated = queryset.update(approval_status='approved')
-        self.message_user(request, f'Одобрено {updated} магазинов')
-
-    approve_stores.short_description = 'Одобрить выбранные магазины'
-
-    def reject_stores(self, request, queryset):
-        updated = queryset.update(approval_status='rejected', is_active=False)
-        self.message_user(request, f'Отклонено {updated} магазинов')
-
-    reject_stores.short_description = 'Отклонить выбранные магазины'
+@admin.register(StoreProductRequest)
+class StoreProductRequestAdmin(admin.ModelAdmin):
+    list_display = ['store', 'product', 'quantity', 'created_at']
+    list_filter = ['created_at']
+    search_fields = ['store__name', 'product__name']
 
 
 class StoreRequestItemInline(admin.TabularInline):
     model = StoreRequestItem
     extra = 1
-    readonly_fields = ['total']
 
+    # ИСПРАВЛЕНИЕ #17: Безопасное отображение в админке
+    readonly_fields = ['calculated_total']
+    fields = ['product', 'quantity', 'price', 'calculated_total', 'is_cancelled']
 
-@admin.register(StoreSelection)
-class StoreSelectionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'user', 'store', 'selected_at']
-    list_filter = ['selected_at']
-    search_fields = ['user__name', 'store__name']
-    readonly_fields = ['selected_at']
+    def calculated_total(self, obj):
+        """
+        ИСПРАВЛЕНИЕ #17: Защита от NoneType при отображении
+        """
+        if obj.price is not None and obj.quantity is not None:
+            total = obj.price * obj.quantity
+            return f"{total} сом"
+        return "Не рассчитано"
 
-
-@admin.register(StoreProductRequest)
-class StoreProductRequestAdmin(admin.ModelAdmin):
-    list_display = ['id', 'store', 'product', 'quantity', 'created_at']
-    list_filter = ['created_at']
-    search_fields = ['store__name', 'product__name']
-    readonly_fields = ['created_at']
+    calculated_total.short_description = 'Итого'
 
 
 @admin.register(StoreRequest)
 class StoreRequestAdmin(admin.ModelAdmin):
-    list_display = [
-        'id', 'store', 'created_by_display', 'total_amount_display',
-        'items_count', 'note', 'status', 'created_at'
-    ]
-    list_filter = ['status', 'created_at']
-    search_fields = ['store__name', 'created_by__name', 'note']
-    readonly_fields = ['created_by', 'created_at']
+    list_display = ['id', 'store', 'created_by', 'total_amount', 'created_at']
+    list_filter = ['created_at']
+    search_fields = ['store__name']
+    readonly_fields = ['total_amount', 'created_at']
     inlines = [StoreRequestItemInline]
 
-    def created_by_display(self, obj):
-        if obj.created_by:
-            return format_html(
-                '<a href="?created_by__id__exact={}">{}</a>',
-                obj.created_by.id,
-                obj.created_by.phone
-            )
-        return '—'
+    def save_model(self, request, obj, form, change):
+        """
+        ИСПРАВЛЕНИЕ #17: Безопасное сохранение с расчётом total_amount
+        """
+        super().save_model(request, obj, form, change)
 
-    created_by_display.short_description = 'Создал'
+        # Пересчитываем total_amount после сохранения всех items
+        if obj.pk:
+            total = Decimal('0')
+            for item in obj.items.all():
+                if item.price is not None and item.quantity is not None and not item.is_cancelled:
+                    total += item.price * item.quantity
 
-    def total_amount_display(self, obj):
-        return format_html('<strong>{} сом</strong>', obj.total_amount)
-
-    total_amount_display.short_description = 'Сумма'
-
-    def items_count(self, obj):
-        return obj.items.count()
-
-    items_count.short_description = 'Позиций'
+            obj.total_amount = total
+            obj.save(update_fields=['total_amount'])
 
 
 @admin.register(StoreInventory)
 class StoreInventoryAdmin(admin.ModelAdmin):
-    list_display = ['id', 'store', 'product', 'quantity_display', 'total_price_display', 'last_updated']
+    list_display = ['store', 'product', 'quantity', 'last_updated']
     list_filter = ['store', 'last_updated']
     search_fields = ['store__name', 'product__name']
-    readonly_fields = ['last_updated']
-    ordering = ['-last_updated']
-
-    def quantity_display(self, obj):
-        if obj.quantity <= 0:
-            return format_html('<span style="color: red;">0</span>')
-        elif obj.quantity < 10:
-            return format_html('<span style="color: orange;">{} {}</span>', obj.quantity,
-                               obj.product.get_unit_display())
-        return format_html('<span style="color: green;">{} {}</span>', obj.quantity, obj.product.get_unit_display())
-
-    quantity_display.short_description = 'Количество'
-
-    def total_price_display(self, obj):
-        return format_html('<strong>{} сом</strong>', obj.total_price)
-
-    total_price_display.short_description = 'Стоимость'
 
 
 @admin.register(PartnerInventory)
 class PartnerInventoryAdmin(admin.ModelAdmin):
-    list_display = ['id', 'partner', 'product', 'quantity_display', 'last_updated']
+    list_display = ['partner', 'product', 'quantity', 'last_updated']
     list_filter = ['partner', 'last_updated']
     search_fields = ['partner__name', 'product__name']
-    readonly_fields = ['last_updated']
-    ordering = ['-last_updated']
-
-    def quantity_display(self, obj):
-        if obj.quantity <= 0:
-            return format_html('<span style="color: red;">0</span>')
-        return format_html('<span style="color: green;">{} {}</span>', obj.quantity, obj.product.get_unit_display())
-
-    quantity_display.short_description = 'Количество'
 
 
 class ReturnRequestItemInline(admin.TabularInline):
     model = ReturnRequestItem
     extra = 1
-    readonly_fields = ['total']  # Optional, if you have a total property
+
+    # ИСПРАВЛЕНИЕ #18: Безопасное отображение в админке
+    readonly_fields = ['calculated_total']
+    fields = ['product', 'quantity', 'price', 'calculated_total']
+
+    def calculated_total(self, obj):
+        """
+        ИСПРАВЛЕНИЕ #18: Защита от NoneType при отображении
+        """
+        if obj.price is not None and obj.quantity is not None:
+            total = obj.price * obj.quantity
+            return f"{total} сом"
+        return "Не рассчитано"
+
+    calculated_total.short_description = 'Итого'
 
 
 @admin.register(ReturnRequest)
 class ReturnRequestAdmin(admin.ModelAdmin):
-    list_display = ['id', 'store', 'status', 'total_amount', 'reason', 'created_at']
+    list_display = ['id', 'partner', 'store', 'status', 'total_amount', 'created_at']
     list_filter = ['status', 'created_at']
-    search_fields = ['store__name', 'reason']
-    readonly_fields = ['created_at']
+    search_fields = ['partner__name', 'store__name']
+    readonly_fields = ['total_amount', 'created_at']
     inlines = [ReturnRequestItemInline]
+
+    def save_model(self, request, obj, form, change):
+        """
+        ИСПРАВЛЕНИЕ #18: Безопасное сохранение с расчётом total_amount
+        """
+        # ИСПРАВЛЕНИЕ #17/#18: Устанавливаем default значения если None
+        if not change:  # При создании
+            obj.total_amount = Decimal('0')
+
+        super().save_model(request, obj, form, change)
+
+        # Пересчитываем total_amount после сохранения всех items
+        if obj.pk:
+            total = Decimal('0')
+            for item in obj.items.all():
+                if item.price is not None and item.quantity is not None:
+                    total += item.price * item.quantity
+
+            obj.total_amount = total
+            obj.save(update_fields=['total_amount'])
+
+
+@admin.register(StoreRequestItem)
+class StoreRequestItemAdmin(admin.ModelAdmin):
+    list_display = ['request', 'product', 'quantity', 'price', 'total_display', 'is_cancelled']
+    list_filter = ['is_cancelled']
+    search_fields = ['product__name']
+
+    def total_display(self, obj):
+        """
+        ИСПРАВЛЕНИЕ #17: Безопасное отображение total
+        """
+        if obj.price is not None and obj.quantity is not None:
+            return f"{obj.price * obj.quantity} сом"
+        return "Не рассчитано"
+
+    total_display.short_description = 'Итого'
+
+
+@admin.register(ReturnRequestItem)
+class ReturnRequestItemAdmin(admin.ModelAdmin):
+    list_display = ['request', 'product', 'quantity', 'price', 'total_display']
+    search_fields = ['product__name']
+
+    def total_display(self, obj):
+        """
+        ИСПРАВЛЕНИЕ #18: Безопасное отображение total
+        """
+        if obj.price is not None and obj.quantity is not None:
+            return f"{obj.price * obj.quantity} сом"
+        return "Не рассчитано"
+
+    total_display.short_description = 'Итого'

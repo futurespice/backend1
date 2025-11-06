@@ -1,20 +1,30 @@
+# apps/stores/serializers.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from rest_framework import serializers
+from decimal import Decimal
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
+
 from .models import (
     Region, City, Store, StoreSelection,
     StoreProductRequest, StoreRequest, StoreRequestItem,
     StoreInventory, PartnerInventory, ReturnRequest, ReturnRequestItem
 )
 from products.models import Product
-from decimal import Decimal
 
+
+# ============= REGION & CITY =============
 
 class CitySerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #4: Сериализатор города"""
+    region_name = serializers.CharField(source='region.name', read_only=True)
+
     class Meta:
         model = City
-        fields = ['id', 'name']
+        fields = ['id', 'name', 'region', 'region_name']
 
 
 class RegionSerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #4: Сериализатор региона с городами"""
     cities = CitySerializer(many=True, read_only=True)
 
     class Meta:
@@ -22,227 +32,184 @@ class RegionSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'cities']
 
 
+# ============= STORE =============
+
 class StoreSerializer(serializers.ModelSerializer):
+    """Сериализатор магазина"""
     region_name = serializers.CharField(source='region.name', read_only=True)
     city_name = serializers.CharField(source='city.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    approval_status_display = serializers.CharField(source='get_approval_status_display', read_only=True)
 
     class Meta:
         model = Store
         fields = [
             'id', 'name', 'inn', 'owner_name', 'phone',
-            'region', 'region_name',
-            'city', 'city_name',
-            'address',
-            'latitude', 'longitude',
-            'debt', 'approval_status',
-            'is_active',
-            'created_by', 'created_by_name',
+            'region', 'region_name', 'city', 'city_name',
+            'address', 'latitude', 'longitude',
+            'debt', 'approval_status', 'approval_status_display',
+            'is_active', 'created_by', 'created_by_name',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['created_by', 'created_at', 'updated_at', 'approval_status']
-
-    def validate_inn(self, value):
-        """Проверка уникальности ИНН"""
-        if Store.objects.filter(inn=value).exclude(id=self.instance.id if self.instance else None).exists():
-            raise serializers.ValidationError("Магазин с таким ИНН уже существует")
-        return value
-
-    def validate_phone(self, value):
-        """Проверка уникальности телефона"""
-        if Store.objects.filter(phone=value).exclude(id=self.instance.id if self.instance else None).exists():
-            raise serializers.ValidationError("Магазин с таким телефоном уже существует")
-        return value
+        read_only_fields = ['debt', 'created_by', 'created_at', 'updated_at']
 
 
 class StoreSelectionSerializer(serializers.ModelSerializer):
-    store = StoreSerializer(read_only=True)
+    """Выбор магазина"""
+    store_name = serializers.CharField(source='store.name', read_only=True)
 
     class Meta:
         model = StoreSelection
-        fields = ['id', 'store', 'selected_at']
+        fields = ['id', 'store', 'store_name', 'selected_at']
 
+
+# ============= PRODUCT REQUESTS =============
 
 class StoreProductRequestSerializer(serializers.ModelSerializer):
-    """Общий список запрошенных товаров магазина"""
+    """Запрос на товар (временная корзина)"""
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
+    product_price = serializers.DecimalField(
+        source='product.price',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+
+    # ИСПРАВЛЕНИЕ #19: типизация для @extend_schema_field
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость"""
+        return obj.quantity * obj.product.price
+
+    total = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreProductRequest
-        fields = ['id', 'store', 'product', 'product_name', 'product_unit', 'quantity', 'created_at']
+        fields = [
+            'id', 'store', 'product', 'product_name',
+            'product_price', 'quantity', 'total',
+            'created_at'
+        ]
+        read_only_fields = ['store', 'created_at']
 
-    def validate_quantity(self, value):
-        """Валидация количества (весовые: шаг 0.1, штучные: целые)"""
-        product = self.initial_data.get('product') or (self.instance.product if self.instance else None)
-        if product:
-            product = Product.objects.get(id=product)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1")
-            else:
-                if not value.is_integer():
-                    raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
 
+# ============= STORE REQUESTS =============
 
 class StoreRequestItemSerializer(serializers.ModelSerializer):
+    """Позиция в запросе магазина"""
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость позиции"""
+        return obj.total
+
+    total = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreRequestItem
         fields = [
-            'id', 'product', 'product_name', 'product_unit',
+            'id', 'product', 'product_name',
             'quantity', 'price', 'total', 'is_cancelled'
         ]
-        read_only_fields = ['total', 'is_cancelled']
-
-    def validate_quantity(self, value):
-        """Валидация количества"""
-        product = self.initial_data.get('product') or (self.instance.product if self.instance else None)
-        if product:
-            product = Product.objects.get(id=product)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1")
-            else:
-                if not value.is_integer():
-                    raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
-
-
-class CreateStoreRequestSerializer(serializers.Serializer):
-    """Создание запроса магазина"""
-    store = serializers.PrimaryKeyRelatedField(queryset=Store.objects.all())
-    note = serializers.CharField(max_length=500, allow_blank=True)
-    items = StoreRequestItemSerializer(many=True)
-
-    def validate(self, attrs):
-        items = attrs.get('items')
-        if not items:
-            raise serializers.ValidationError("Необходимо указать хотя бы одну позицию")
-        return attrs
 
 
 class StoreRequestSerializer(serializers.ModelSerializer):
     """История запросов магазина"""
     store_name = serializers.CharField(source='store.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     items = StoreRequestItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = StoreRequest
         fields = [
-            'id', 'store', 'store_name',
-            'created_by', 'created_by_name',
-            'total_amount', 'note', 'status',
-            'items', 'created_at'
+            'id', 'store', 'store_name', 'created_by', 'created_by_name',
+            'total_amount', 'note', 'items', 'created_at'
         ]
-        read_only_fields = ['created_by', 'total_amount', 'status', 'created_at']
+        read_only_fields = ['total_amount', 'created_at']
 
+
+class CreateStoreRequestSerializer(serializers.Serializer):
+    """
+    ИСПРАВЛЕНИЕ #11: Создание запроса с idempotency_key
+    """
+    note = serializers.CharField(required=False, allow_blank=True)
+    idempotency_key = serializers.CharField(required=False, allow_null=True)
+
+
+# ============= INVENTORY =============
 
 class StoreInventorySerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #9: Инвентарь магазина"""
+    store_name = serializers.CharField(source='store.name', read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
-    product_price = serializers.DecimalField(
-        source='product.price',
-        max_digits=10,
-        decimal_places=2,
-        read_only=True
-    )
-    total_price = serializers.ReadOnlyField()
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total_price(self, obj) -> Decimal:
+        """Общая стоимость"""
+        return obj.total_price
+
+    total_price = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreInventory
         fields = [
-            'id', 'product', 'product_name', 'product_unit',
-            'product_price', 'quantity', 'total_price',
-            'last_updated'
+            'id', 'store', 'store_name', 'product', 'product_name',
+            'product_unit', 'quantity', 'total_price', 'last_updated'
         ]
-
-    def validate_quantity(self, value):
-        """Валидация количества"""
-        product = self.initial_data.get('product') or (self.instance.product if self.instance else None)
-        if product:
-            product = Product.objects.get(id=product)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1")
-            else:
-                if not value.is_integer():
-                    raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
 
 
 class PartnerInventorySerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #9: Инвентарь партнёра"""
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
-    product_price = serializers.DecimalField(
-        source='product.price',
-        max_digits=10,
-        decimal_places=2,
-        read_only=True
-    )
 
     class Meta:
         model = PartnerInventory
         fields = [
-            'id', 'product', 'product_name', 'product_unit',
-            'product_price', 'quantity', 'last_updated'
+            'id', 'partner', 'partner_name', 'product', 'product_name',
+            'product_unit', 'quantity', 'last_updated'
         ]
 
-    def validate_quantity(self, value):
-        """Валидация количества"""
-        product = self.initial_data.get('product') or (self.instance.product if self.instance else None)
-        if product:
-            product = Product.objects.get(id=product)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1")
-            else:
-                if not value.is_integer():
-                    raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
 
+# ============= RETURN REQUESTS =============
 
 class ReturnRequestItemSerializer(serializers.ModelSerializer):
+    """Позиция в возврате"""
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость позиции"""
+        return obj.total
+
+    total = serializers.SerializerMethodField()
 
     class Meta:
         model = ReturnRequestItem
-        fields = ['id', 'product', 'product_name', 'product_unit', 'quantity', 'price', 'total']
-
-    def validate_quantity(self, value):
-        """Валидация количества"""
-        product = self.initial_data.get('product') or (self.instance.product if self.instance else None)
-        if product:
-            product = Product.objects.get(id=product)
-            if product.category == 'weight':
-                if value % Decimal('0.1') != 0:
-                    raise serializers.ValidationError("Количество для весовых товаров должно быть кратно 0.1")
-                if value < Decimal('0.1'):
-                    raise serializers.ValidationError("Минимальное количество для весовых товаров: 0.1")
-            else:
-                if not value.is_integer():
-                    raise serializers.ValidationError("Количество для штучных товаров должно быть целым")
-        return value
+        fields = [
+            'id', 'product', 'product_name',
+            'quantity', 'price', 'total'
+        ]
 
 
 class ReturnRequestSerializer(serializers.ModelSerializer):
-    items = ReturnRequestItemSerializer(many=True, read_only=True)
+    """ИСПРАВЛЕНИЕ #8: Запрос на возврат"""
     partner_name = serializers.CharField(source='partner.name', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True, allow_null=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    items = ReturnRequestItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = ReturnRequest
-        fields = ['id', 'partner', 'partner_name', 'status', 'total_amount', 'items', 'created_at']
-        read_only_fields = ['partner', 'total_amount', 'created_at']
+        fields = [
+            'id', 'partner', 'partner_name', 'store', 'store_name',
+            'order', 'status', 'status_display', 'total_amount',
+            'reason', 'items', 'created_at'
+        ]
+        read_only_fields = ['partner', 'total_amount', 'status', 'created_at']

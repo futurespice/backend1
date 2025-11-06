@@ -1,21 +1,24 @@
+# apps/stores/urls.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    RegionViewSet, StoreViewSet, StoreSelectionViewSet,
+    RegionViewSet, CityViewSet, StoreViewSet, StoreSelectionViewSet,
     StoreProductRequestViewSet, StoreRequestViewSet,
-    StoreInventoryViewSet, PartnerInventoryViewSet,
-    ReturnRequestViewSet
+    StoreInventoryViewSet, PartnerInventoryViewSet, ReturnRequestViewSet
 )
 
 router = DefaultRouter()
-router.register('regions', RegionViewSet, basename='regions')
-router.register('stores', StoreViewSet, basename='stores')
-router.register('selection', StoreSelectionViewSet, basename='selection')
-router.register('product-requests', StoreProductRequestViewSet, basename='product-requests')
-router.register('requests', StoreRequestViewSet, basename='requests')
-router.register('inventory', StoreInventoryViewSet, basename='inventory')
-router.register('partner-inventory', PartnerInventoryViewSet, basename='partner-inventory')
-router.register('returns', ReturnRequestViewSet, basename='returns')
+
+# ИСПРАВЛЕНИЕ #4: Добавлен CityViewSet
+router.register(r'regions', RegionViewSet, basename='regions')
+router.register(r'cities', CityViewSet, basename='cities')
+router.register(r'stores', StoreViewSet, basename='stores')
+router.register(r'selection', StoreSelectionViewSet, basename='store-selection')
+router.register(r'product-requests', StoreProductRequestViewSet, basename='product-requests')
+router.register(r'requests', StoreRequestViewSet, basename='store-requests')
+router.register(r'inventory', StoreInventoryViewSet, basename='store-inventory')
+router.register(r'partner-inventory', PartnerInventoryViewSet, basename='partner-inventory')
+router.register(r'returns', ReturnRequestViewSet, basename='return-requests')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -1,14 +1,16 @@
+# apps/stores/models.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator, RegexValidator
 from decimal import Decimal
 from django.core.exceptions import ValidationError
+from django.db import transaction
 
 
 class Region(models.Model):
     """Регион/Область"""
+    # ИСПРАВЛЕНИЕ #1: Убрано ненужное поле code
     name = models.CharField(max_length=100, unique=True, verbose_name='Название')
-    code = models.CharField(max_length=10, unique=True, blank=True, verbose_name='Код')
 
     class Meta:
         db_table = 'regions'
@@ -46,6 +48,7 @@ class Store(models.Model):
     Магазин - общая сущность.
     Любой пользователь с ролью STORE может выбрать магазин и работать от его имени.
     """
+    # ИСПРАВЛЕНИЕ #13: ИНН валидация 12-14 цифр
     inn_regex = RegexValidator(
         regex=r'^\d{12,14}$',
         message='ИНН должен быть 12-14 цифр'
@@ -151,7 +154,10 @@ class StoreSelection(models.Model):
 
 
 class StoreProductRequest(models.Model):
-    """Запрос магазина на товар (не влияет на инвентарь)"""
+    """
+    Запрос магазина на товар (временный список "корзины")
+    НЕ влияет на инвентарь, пока не подтверждён партнёром
+    """
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
@@ -167,7 +173,7 @@ class StoreProductRequest(models.Model):
         max_digits=10,
         decimal_places=2,
         validators=[MinValueValidator(Decimal('0.1'))],
-        verbose_name='Количество'
+        verbose_name='Запрошенное количество'
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
 
@@ -175,6 +181,7 @@ class StoreProductRequest(models.Model):
         db_table = 'store_product_requests'
         verbose_name = 'Запрос товара'
         verbose_name_plural = 'Запросы товаров'
+        unique_together = ['store', 'product']
         ordering = ['-created_at']
 
     def __str__(self):
@@ -182,7 +189,10 @@ class StoreProductRequest(models.Model):
 
 
 class StoreRequest(models.Model):
-    """История запросов магазина"""
+    """
+    История запросов магазина.
+    Создается из StoreProductRequest при финальном подтверждении.
+    """
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
@@ -203,19 +213,30 @@ class StoreRequest(models.Model):
         verbose_name='Общая сумма'
     )
     note = models.TextField(blank=True, verbose_name='Примечание')
-    status = models.CharField(
-        max_length=20,
-        choices=[('pending', 'Ожидает'), ('approved', 'Подтвержден'), ('rejected', 'Отклонен'), ('cancelled', 'Отменен')],
-        default='pending',
-        verbose_name='Статус'
-    )
+
+    # ИСПРАВЛЕНИЕ #6: Убрал статусы - это не заказ, а просто запрос
+    # Статус есть только у заказа партнёра → админу
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    # ИСПРАВЛЕНИЕ #11: Защита от race condition
+    idempotency_key = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        verbose_name='Ключ идемпотентности'
+    )
 
     class Meta:
         db_table = 'store_requests'
         verbose_name = 'Запрос магазина'
         verbose_name_plural = 'Запросы магазинов'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['store', 'created_at']),
+            models.Index(fields=['idempotency_key']),
+        ]
 
     def __str__(self):
         return f"Запрос {self.id} от {self.store.name}"
@@ -257,7 +278,8 @@ class StoreRequestItem(models.Model):
         return f"{self.product.name}: {self.quantity} ({self.request.id})"
 
     @property
-    def total(self):
+    def total(self) -> Decimal:  # ИСПРАВЛЕНИЕ #19: типизация
+        """Общая стоимость позиции"""
         return self.quantity * self.price
 
 
@@ -293,9 +315,11 @@ class StoreInventory(models.Model):
         return f"{self.store.name} - {self.product.name}: {self.quantity} {self.product.get_unit_display()}"
 
     @property
-    def total_price(self):
+    def total_price(self) -> Decimal:  # ИСПРАВЛЕНИЕ #19: типизация
         """Общая стоимость товара в инвентаре"""
-        return self.quantity * self.product.price
+        if self.product and self.product.price:
+            return self.quantity * self.product.price
+        return Decimal('0')
 
     def check_stock(self, quantity):
         """Проверка достаточности на складе"""
@@ -342,23 +366,24 @@ class PartnerInventory(models.Model):
 
 
 class ReturnRequest(models.Model):
-    partner = models.ForeignKey(  # <-- Add this field
+    """Запрос на возврат товаров от партнера к админу"""
+    partner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='partner_return_requests',  # Unique related_name to avoid conflicts with store's
-        limit_choices_to={'role': 'partner'},  # Optional: Restrict to partner users
-        verbose_name='Партнер',
-        null = True,  # <-- Добавьте это
-        blank = True
+        related_name='partner_return_requests',
+        limit_choices_to={'role': 'partner'},
+        verbose_name='Партнер'
     )
     store = models.ForeignKey(
-        'stores.Store',
+        Store,
         on_delete=models.CASCADE,
         related_name='return_requests',
-        verbose_name='Магазин'
+        verbose_name='Магазин',
+        null=True,
+        blank=True
     )
     order = models.ForeignKey(
-        'orders.Order',
+        'orders.PartnerOrder',  # ИСПРАВЛЕНИЕ #5: ссылка на правильную модель заказа
         on_delete=models.CASCADE,
         related_name='return_requests',
         verbose_name='Заказ',
@@ -381,14 +406,27 @@ class ReturnRequest(models.Model):
     reason = models.TextField(blank=True, verbose_name='Причина')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
 
+    # ИСПРАВЛЕНИЕ #11: Защита от race condition
+    idempotency_key = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        verbose_name='Ключ идемпотентности'
+    )
+
     class Meta:
         db_table = 'return_requests'
         verbose_name = 'Запрос на возврат'
         verbose_name_plural = 'Запросы на возврат'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['partner', 'created_at']),
+            models.Index(fields=['idempotency_key']),
+        ]
 
     def __str__(self):
-        return f"Возврат {self.id} для {self.store.name}"
+        return f"Возврат {self.id} от партнера {self.partner.name}"
 
 
 class ReturnRequestItem(models.Model):
@@ -413,6 +451,7 @@ class ReturnRequestItem(models.Model):
     price = models.DecimalField(
         max_digits=10,
         decimal_places=2,
+        default=Decimal('0'),  # ИСПРАВЛЕНИЕ #17/#18: default для price
         validators=[MinValueValidator(Decimal('0'))],
         verbose_name='Цена за единицу'
     )
@@ -426,5 +465,8 @@ class ReturnRequestItem(models.Model):
         return f"{self.product.name}: {self.quantity} ({self.request.id})"
 
     @property
-    def total(self):
-        return self.quantity * self.price
+    def total(self) -> Decimal:  # ИСПРАВЛЕНИЕ #19: типизация
+        """Общая стоимость позиции"""
+        if self.price is not None:
+            return self.quantity * self.price
+        return Decimal('0')

@@ -3,45 +3,60 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from datetime import date
+from decimal import Decimal
 
 from .models import (
-    Product, Expense, ProductionRecord, ProductionItem,
+    ProductCategory, Product, Expense, ProductionRecord, ProductionItem,
     MechanicalExpenseEntry, BonusHistory, StoreProductCounter,
     ProductExpenseRelation, DefectiveProduct
 )
 from .serializers import (
-    ProductListSerializer, ProductDetailSerializer,
+    ProductCategorySerializer, ProductListSerializer, ProductDetailSerializer,
     ExpenseSerializer, ProductionRecordSerializer,
     ProductionItemSerializer, MechanicalExpenseEntrySerializer,
     BonusHistorySerializer, ProductExpenseRelationSerializer,
     DefectiveProductSerializer
 )
 from .services import CostCalculator, BonusService
-from .permissions import IsAdminOnly, IsPartnerOrAdmin
+from users.permissions import IsAdminUser, IsPartnerUser
+
+
+class ProductCategoryViewSet(viewsets.ModelViewSet):
+    """Категории товаров"""
+    queryset = ProductCategory.objects.filter(is_active=True).select_related('parent')
+    serializer_class = ProductCategorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsAdminUser()]
+        return [IsAuthenticated()]
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
     """Расходы — только ADMIN"""
     serializer_class = ExpenseSerializer
-    permission_classes = [IsAuthenticated, IsAdminOnly]
-    queryset = Expense.objects.all()
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = Expense.objects.all().order_by('-created_at')
 
     @action(detail=False, methods=['get'])
     def physical(self, request):
         """Только физические расходы"""
-        expenses = self.queryset.filter(expense_type='physical')
+        expenses = self.queryset.filter(expense_type='physical', is_active=True)
         serializer = self.get_serializer(expenses, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def overhead(self, request):
         """Только накладные расходы"""
-        expenses = self.queryset.filter(expense_type='overhead')
+        expenses = self.queryset.filter(expense_type='overhead', is_active=True)
         serializer = self.get_serializer(expenses, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def deactivate(self, request, pk=None):
         """Деактивация расхода"""
         expense = self.get_object()
@@ -51,8 +66,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
 
 class ProductViewSet(viewsets.ModelViewSet):
-    """Товары — ADMIN создаёт, все видят"""
-    queryset = Product.objects.all().prefetch_related('images')
+    """
+    Товары — ADMIN создаёт, все видят
+    N+1 защита: prefetch_related('images', 'expense_relations')
+    """
+    queryset = Product.objects.select_related('category').prefetch_related(
+        'images', 'expense_relations__expense'
+    ).order_by('-created_at')
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -60,28 +80,17 @@ class ProductViewSet(viewsets.ModelViewSet):
         return ProductDetailSerializer
 
     def get_permissions(self):
-        # Создание/редактирование только ADMIN
-        if self.action in ['create', 'update', 'partial_update', 'destroy', 'reorder']:
-            return [IsAuthenticated(), IsAdminOnly()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsAdminUser()]
         return [IsAuthenticated()]
 
+    @transaction.atomic
     def perform_destroy(self, instance):
-        """Удаление товара (полное из БД)"""
+        """Удаление товара"""
         instance.delete()
 
-    @action(detail=True, methods=['post'])
-    def reorder(self, request, pk=None):
-        """Изменить позицию товара"""
-        product = self.get_object()
-        new_position = request.data.get('position')
-
-        if new_position is not None:
-            product.position = new_position
-            product.save()
-
-        return Response({'position': product.position})
-
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminOnly])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminUser])
+    @transaction.atomic
     def add_expense_relation(self, request, pk=None):
         """Добавить связь с расходом (пропорция)"""
         product = self.get_object()
@@ -103,25 +112,33 @@ class ProductViewSet(viewsets.ModelViewSet):
 class ProductionViewSet(viewsets.ModelViewSet):
     """Учёт данных (таблица производства) — только ADMIN"""
     serializer_class = ProductionRecordSerializer
-    permission_classes = [IsAuthenticated, IsAdminOnly]
-    queryset = ProductionRecord.objects.all()
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = ProductionRecord.objects.select_related('partner').prefetch_related(
+        'items__product', 'mechanical_expenses__expense'
+    ).order_by('-date')
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
-        """Создание записи на дату"""
-        date_str = request.data.get('date', date.today())
+        """Создание или получение записи на дату"""
+        date_str = request.data.get('date', str(date.today()))
+        partner = request.user
 
-        record, created = ProductionRecord.objects.get_or_create(date=date_str)
+        record, created = ProductionRecord.objects.get_or_create(
+            partner=partner,
+            date=date_str
+        )
 
         serializer = self.get_serializer(record)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_item(self, request, pk=None):
         """Добавить товар в таблицу"""
         record = self.get_object()
         product_id = request.data.get('product_id')
-        quantity_produced = request.data.get('quantity_produced', 0)
-        suzerain_amount = request.data.get('suzerain_amount', 0)
+        quantity_produced = Decimal(request.data.get('quantity_produced', 0))
+        suzerain_amount = Decimal(request.data.get('suzerain_amount', 0))
 
         product = get_object_or_404(Product, id=product_id)
 
@@ -134,18 +151,19 @@ class ProductionViewSet(viewsets.ModelViewSet):
             }
         )
 
-        # Расчёт
+        # Расчёт себестоимости
         CostCalculator.calculate_production_item(item)
 
         serializer = ProductionItemSerializer(item)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_mechanical_expense(self, request, pk=None):
         """Добавить механический расход (солярка, обеды)"""
         record = self.get_object()
         expense_id = request.data.get('expense_id')
-        amount_spent = request.data.get('amount_spent', 0)
+        amount_spent = Decimal(request.data.get('amount_spent', 0))
 
         expense = get_object_or_404(Expense, id=expense_id, state='mechanical')
 
@@ -162,78 +180,79 @@ class ProductionViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def save_data(self, request, pk=None):
-        """Сохранить данные за день (перезапись)"""
+        """Сохранить/пересчитать данные за день"""
         record = self.get_object()
-
-        # Пересчитываем всё
         CostCalculator.recalculate_all_items(record)
-
         serializer = self.get_serializer(record)
         return Response(serializer.data)
 
 
 class BonusViewSet(viewsets.ReadOnlyModelViewSet):
-    """История бонусов"""
+    """История бонусов (только чтение)"""
     serializer_class = BonusHistorySerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
+        queryset = BonusHistory.objects.select_related(
+            'store', 'partner', 'product', 'order'
+        )
 
-        if user.role == 'ADMIN':
-            return BonusHistory.objects.all()
+        if user.role == 'admin':
+            return queryset
+        elif user.role == 'partner':
+            return queryset.filter(partner=user)
+        elif user.role == 'store':
+            return queryset.filter(store__selections__user=user)
 
-        if user.role == 'PARTNER':
-            return BonusHistory.objects.filter(partner=user)
-
-        return BonusHistory.objects.filter(store=user)
-
-    @action(detail=False, methods=['get'])
-    def progress(self, request):
-        """Прогресс до бонуса для STORE"""
-        if request.user.role != 'STORE':
-            return Response({'error': 'Only for stores'}, status=status.HTTP_403_FORBIDDEN)
-
-        counters = StoreProductCounter.objects.filter(
-            store=request.user
-        ).select_related('product', 'partner')
-
-        data = [
-            {
-                'product_id': c.product.id,
-                'product_name': c.product.name,
-                'partner_name': c.partner.username,
-                'progress': c.bonus_eligible_count,
-                'total_count': c.total_count
-            }
-            for c in counters
-        ]
-
-        return Response(data)
+        return queryset.none()
 
 
 class DefectiveProductViewSet(viewsets.ModelViewSet):
-    """Бракованные товары (партнёр фиксирует свой брак)"""
+    """Бракованные товары"""
     serializer_class = DefectiveProductSerializer
-    permission_classes = [IsAuthenticated, IsPartnerOrAdmin]
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == 'ADMIN':
-            return DefectiveProduct.objects.all()
-        return DefectiveProduct.objects.filter(partner=user)
+        queryset = DefectiveProduct.objects.select_related('partner', 'product')
 
-    @action(detail=False, methods=['get'])
-    def stats(self, request):
-        """Статистика брака"""
-        queryset = self.get_queryset()
+        if user.role == 'admin':
+            return queryset
+        elif user.role == 'partner':
+            return queryset.filter(partner=user)
 
-        from django.db.models import Sum
-        total_defects = queryset.count()
-        total_amount = queryset.aggregate(Sum('amount'))['amount__sum'] or 0
+        return queryset.none()
 
-        return Response({
-            'total_defects': total_defects,
-            'total_amount': total_amount
-        })
+    def get_permissions(self):
+        if self.action in ['create']:
+            return [IsAuthenticated(), IsPartnerUser()]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsAdminUser()]
+        return [IsAuthenticated()]
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        serializer.save(partner=self.request.user)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminUser])
+    @transaction.atomic
+    def confirm(self, request, pk=None):
+        """Подтвердить брак"""
+        defect = self.get_object()
+        defect.status = 'confirmed'
+        defect.resolved_at = date.today()
+        defect.save()
+        return Response({'status': 'confirmed'})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsAdminUser])
+    @transaction.atomic
+    def reject(self, request, pk=None):
+        """Отклонить брак"""
+        defect = self.get_object()
+        defect.status = 'rejected'
+        defect.resolved_at = date.today()
+        defect.save()
+        return Response({'status': 'rejected'})

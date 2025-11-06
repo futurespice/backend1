@@ -2,7 +2,7 @@ from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
 from decimal import Decimal
-
+from django.conf import settings
 
 # ============= EXPENSES =============
 
@@ -79,68 +79,195 @@ class Expense(models.Model):
 
 # ============= PRODUCTS =============
 
-class ProductCategory(models.TextChoices):
-    PIECE = 'piece', 'Штучный'
-    WEIGHT = 'weight', 'Весовой'
+class ProductCategory(models.Model):
+    """Категория товаров"""
+    name = models.CharField(max_length=100, unique=True, verbose_name='Название')
+    description = models.TextField(blank=True, verbose_name='Описание')
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='children',
+        verbose_name='Родительская категория'
+    )
+    is_active = models.BooleanField(default=True, verbose_name='Активна')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    class Meta:
+        db_table = 'product_categories'
+        verbose_name = 'Категория товаров'
+        verbose_name_plural = 'Категории товаров'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
 
 
 class Product(models.Model):
-    # Убираем partner — товары создаёт только ADMIN
-    name = models.CharField(max_length=255)
-    description = models.CharField(max_length=250, blank=True)
+    """
+    Товар
+    ИСПРАВЛЕНИЕ #12: Добавлена поддержка весовых товаров
+    """
+    UNIT_CHOICES = [
+        ('kg', 'Килограмм'),
+        ('piece', 'Штука'),
+        ('liter', 'Литр'),
+        ('pack', 'Упаковка'),
+    ]
 
-    category = models.CharField(max_length=10, choices=ProductCategory.choices, default=ProductCategory.PIECE)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-
-    stock_quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-
-    is_bonus = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-
-    suzerain_expense = models.ForeignKey(
-        Expense,
+    category = models.ForeignKey(
+        ProductCategory,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='suzerain_products',
-        limit_choices_to={'status': ExpenseStatus.SUZERAIN}
+        related_name='products',
+        verbose_name='Категория'
+    )
+    name = models.CharField(max_length=200, verbose_name='Название')
+    description = models.TextField(blank=True, verbose_name='Описание')
+
+    # ИСПРАВЛЕНИЕ #12: Весовые товары
+    is_weight_based = models.BooleanField(
+        default=False,
+        verbose_name='Весовой товар',
+        help_text='Продаётся на вес с шагом 0.1кг (минимум 1кг)'
     )
 
-    position = models.IntegerField(default=0)
+    unit = models.CharField(
+        max_length=10,
+        choices=UNIT_CHOICES,
+        default='piece',
+        verbose_name='Единица измерения'
+    )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    # Цена
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Цена за единицу'
+    )
+
+    # Цена за 100г для весовых товаров
+    price_per_100g = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Цена за 100г',
+        help_text='Автоматически рассчитывается для весовых товаров'
+    )
+
+    # Себестоимость
+    cost_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Себестоимость'
+    )
+
+    # Запасы (общий склад админа)
+    stock_quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name='Количество на складе'
+    )
+
+    # Статус
+    is_active = models.BooleanField(default=True, verbose_name='Активен')
+    is_available = models.BooleanField(default=True, verbose_name='Доступен для заказа')
+
+    # Изображение
+    image = models.ImageField(
+        upload_to='products/',
+        null=True,
+        blank=True,
+        verbose_name='Изображение'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
 
     class Meta:
         db_table = 'products'
-        ordering = ['position', '-created_at']
-        unique_together = [['name']]  # Убираем partner
+        verbose_name = 'Товар'
+        verbose_name_plural = 'Товары'
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['is_active', 'is_available']),
+            models.Index(fields=['category']),
+        ]
 
     def __str__(self):
         return self.name
 
     def clean(self):
-        if self.category == ProductCategory.WEIGHT and self.is_bonus:
-            raise ValidationError("Весовой товар не может быть бонусным")
+        """
+        ИСПРАВЛЕНИЕ #12: Валидация весовых товаров
+        """
+        if self.is_weight_based:
+            # Весовые товары должны быть в кг
+            if self.unit != 'kg':
+                raise ValidationError('Весовые товары должны иметь единицу измерения "Килограмм"')
 
-    def get_price_for_weight(self, weight_kg):
-        if self.category != ProductCategory.WEIGHT:
-            return self.price
-        return (self.price / Decimal('10')) * (weight_kg / Decimal('0.1'))
+            # Автоматический расчёт цены за 100г
+            if self.price > 0:
+                self.price_per_100g = self.price / Decimal('10')  # 1кг = 10 * 100г
 
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def get_unit_display_short(self):
+        """Короткое отображение единицы"""
+        return {
+            'kg': 'кг',
+            'piece': 'шт',
+            'liter': 'л',
+            'pack': 'уп',
+        }.get(self.unit, self.unit)
+
+    def validate_quantity(self, quantity: Decimal) -> bool:
+        """
+        ИСПРАВЛЕНИЕ #12: Валидация количества для весовых товаров
+        """
+        if self.is_weight_based:
+            # Минимум 1кг
+            if quantity < Decimal('1.0'):
+                raise ValidationError(f'Минимальное количество для {self.name}: 1кг')
+
+            # Шаг 0.1кг (100г)
+            remainder = quantity % Decimal('0.1')
+            if remainder != Decimal('0'):
+                raise ValidationError(f'Количество должно быть кратно 0.1кг (100г)')
+
+        return True
 
 class ProductImage(models.Model):
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
-    image = models.ImageField(upload_to='products/')
-    position = models.IntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
+    """Дополнительные изображения товара"""
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='images',
+        verbose_name='Товар'
+    )
+    image = models.ImageField(upload_to='products/', verbose_name='Изображение')
+    position = models.IntegerField(default=0, verbose_name='Порядок')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
 
     class Meta:
         db_table = 'product_images'
         ordering = ['position']
+        verbose_name = 'Изображение товара'
+        verbose_name_plural = 'Изображения товаров'
 
     def __str__(self):
-        return f"Image {self.position} for {self.product.name}"
+        return f"Изображение {self.position} для {self.product.name}"
 
 
 class ProductExpenseRelation(models.Model):
@@ -229,74 +356,165 @@ class MechanicalExpenseEntry(models.Model):
 
 # ============= BONUSES =============
 
-class BonusHistory(models.Model):
-    """История бонусов партнёра-магазина"""
-    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='bonus_given')
-    store = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='bonus_received')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE)
-
-    bonus_count = models.IntegerField(default=0)  # Сколько бонусов дано
-    date = models.DateField(auto_now_add=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'bonus_history'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f"Bonus: {self.product.name} x{self.bonus_count} to {self.store.username}"
-
-
 class StoreProductCounter(models.Model):
-    """Счётчик товаров магазина (для бонусов каждый 21-й)"""
-    store = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='product_counters')
-    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='store_counters')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    """
+    ИСПРАВЛЕНИЕ #12: Счётчик товаров магазина для бонусов
+    Каждый 21-й товар ВСЕГО (не по отдельности для каждого товара)
+    """
+    store = models.ForeignKey(
+        'stores.Store',
+        on_delete=models.CASCADE,
+        related_name='product_counters',
+        verbose_name='Магазин'
+    )
+    partner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        limit_choices_to={'role': 'partner'},
+        related_name='store_counters',
+        verbose_name='Партнёр'
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='store_counters',
+        verbose_name='Товар'
+    )
 
-    total_count = models.IntegerField(default=0)  # Всего куплено
-    bonus_eligible_count = models.IntegerField(default=0)  # Счётчик до бонуса (0-20)
+    # Общий счётчик для бонусов (все товары вместе)
+    total_count = models.IntegerField(default=0, verbose_name='Всего куплено')
 
-    updated_at = models.DateTimeField(auto_now=True)
+    # Счётчик конкретного товара
+    product_count = models.IntegerField(default=0, verbose_name='Куплено этого товара')
+
+    last_bonus_at = models.DateTimeField(null=True, blank=True, verbose_name='Последний бонус')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
 
     class Meta:
         db_table = 'store_product_counters'
-        unique_together = [['store', 'partner', 'product']]
+        verbose_name = 'Счётчик товаров магазина'
+        verbose_name_plural = 'Счётчики товаров магазинов'
+        unique_together = ['store', 'partner', 'product']
+        indexes = [
+            models.Index(fields=['store', 'partner']),
+        ]
 
     def __str__(self):
-        return f"{self.store.username} - {self.product.name}: {self.bonus_eligible_count}/21"
+        return f"{self.store.name} - {self.product.name}: {self.total_count}/{self.product_count}"
+
+    def check_bonus(self) -> bool:
+        """
+        ИСПРАВЛЕНИЕ #12: Проверка бонуса
+        Каждый 21-й товар ВСЕГО бесплатно
+        """
+        # Весовые товары НЕ участвуют в бонусах
+        if self.product.is_weight_based:
+            return False
+
+        # Каждый 21-й (21, 42, 63, ...)
+        return self.total_count > 0 and self.total_count % 21 == 0
 
 
-# Добавить в конец models.py
+class BonusHistory(models.Model):
+    """История выданных бонусов"""
+    store = models.ForeignKey(
+        'stores.Store',
+        on_delete=models.CASCADE,
+        related_name='bonus_history',
+        verbose_name='Магазин'
+    )
+    partner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        limit_choices_to={'role': 'partner'},
+        related_name='bonus_history',
+        verbose_name='Партнёр'
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='bonus_history',
+        verbose_name='Товар'
+    )
 
-# В products/models.py — обновляем DefectiveProduct
+    quantity = models.IntegerField(default=1, verbose_name='Количество бонусных единиц')
+    bonus_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        verbose_name='Стоимость бонуса'
+    )
+
+    # Привязка к заказу
+    order = models.ForeignKey(
+        'orders.StoreOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bonuses',
+        verbose_name='Заказ'
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
+
+    class Meta:
+        db_table = 'bonus_history'
+        verbose_name = 'История бонусов'
+        verbose_name_plural = 'История бонусов'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['store', 'partner']),
+            models.Index(fields=['created_at']),
+        ]
+
+    def __str__(self):
+        return f"Бонус для {self.store.name} - {self.product.name} x{self.quantity}"
+
 
 class DefectiveProduct(models.Model):
-    """Брак товара (партнёр фиксирует)"""
-    partner = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='defective_products')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='defects')
+    """Бракованные товары"""
+    partner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        limit_choices_to={'role': 'partner'},
+        related_name='defective_products',
+        verbose_name='Партнёр'
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='defects',
+        verbose_name='Товар'
+    )
 
-    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.1'))],
+        verbose_name='Количество'
+    )
 
-    reason = models.TextField(blank=True)
-    date = models.DateField(auto_now_add=True)
+    reason = models.TextField(verbose_name='Причина брака')
 
-    created_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(
+        max_length=20,
+        choices=[('reported', 'Сообщено'), ('confirmed', 'Подтверждено'), ('rejected', 'Отклонено')],
+        default='reported',
+        verbose_name='Статус'
+    )
+
+    reported_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата сообщения')
+    resolved_at = models.DateTimeField(null=True, blank=True, verbose_name='Дата решения')
 
     class Meta:
         db_table = 'defective_products'
-        ordering = ['-created_at']
+        verbose_name = 'Бракованный товар'
+        verbose_name_plural = 'Бракованные товары'
+        ordering = ['-reported_at']
+        indexes = [
+            models.Index(fields=['partner', 'status']),
+        ]
 
     def __str__(self):
-        return f"Брак: {self.product.name} - {self.quantity} ({self.amount} сом)"
-
-    def save(self, *args, **kwargs):
-        if self.amount == 0 and self.product.category == 'weight':
-            self.amount = self.product.get_price_for_weight(self.quantity)
-
-        super().save(*args, **kwargs)
-
-        if self.product.stock_quantity >= self.quantity:
-            self.product.stock_quantity -= self.quantity
-            self.product.save()
+        return f"Брак: {self.product.name} x{self.quantity} ({self.status})"

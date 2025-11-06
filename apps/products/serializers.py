@@ -1,9 +1,23 @@
 from rest_framework import serializers
+from decimal import Decimal
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
+
 from .models import (
-    Product, ProductImage, Expense, ProductExpenseRelation,
+    ProductCategory, Product, ProductImage, Expense, ProductExpenseRelation,
     ProductionRecord, ProductionItem, MechanicalExpenseEntry,
-    BonusHistory, StoreProductCounter, ProductCategory, DefectiveProduct
+    BonusHistory, StoreProductCounter, DefectiveProduct
 )
+
+
+# ============= CATEGORY =============
+
+class ProductCategorySerializer(serializers.ModelSerializer):
+    parent_name = serializers.CharField(source='parent.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ProductCategory
+        fields = ['id', 'name', 'description', 'parent', 'parent_name', 'is_active', 'created_at']
 
 
 # ============= EXPENSE SERIALIZERS =============
@@ -35,11 +49,10 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
         return data
 
-    # УБИРАЕМ create() — логика теперь в save() модели
 
 class ProductExpenseRelationSerializer(serializers.ModelSerializer):
     expense_name = serializers.CharField(source='expense.name', read_only=True)
-    expense_unit = serializers.CharField(source='expense.unit', read_only=True)
+    expense_unit = serializers.CharField(source='expense.unit', read_only=True, allow_null=True)
 
     class Meta:
         model = ProductExpenseRelation
@@ -56,20 +69,24 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 class ProductListSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
-    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'category', 'category_display',
-            'price', 'is_bonus', 'is_active', 'position', 'images', 'created_at'
+            'id', 'name', 'description', 'category', 'category_name',
+            'unit', 'unit_display', 'price', 'is_weight_based',
+            'is_active', 'is_available', 'stock_quantity',
+            'images', 'created_at'
         ]
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
     expense_relations = ProductExpenseRelationSerializer(many=True, read_only=True)
-    suzerain_expense_name = serializers.CharField(source='suzerain_expense.name', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
     uploaded_images = serializers.ListField(
         child=serializers.ImageField(),
@@ -80,11 +97,11 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'category', 'price',
-            'is_bonus', 'is_active', 'position',
-            'suzerain_expense', 'suzerain_expense_name',
-            'images', 'uploaded_images', 'expense_relations',
-            'created_at', 'updated_at'
+            'id', 'name', 'description', 'category', 'category_name',
+            'unit', 'unit_display', 'price', 'price_per_100g', 'cost_price',
+            'is_weight_based', 'is_active', 'is_available',
+            'stock_quantity', 'image', 'images', 'uploaded_images',
+            'expense_relations', 'created_at', 'updated_at'
         ]
 
     def validate_uploaded_images(self, value):
@@ -93,18 +110,18 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
-        if data.get('category') == ProductCategory.WEIGHT and data.get('is_bonus'):
-            raise serializers.ValidationError("Весовой товар не может быть бонусным")
-
-        if self.instance and self.instance.category == ProductCategory.WEIGHT:
-            if data.get('category') == ProductCategory.PIECE:
-                raise serializers.ValidationError("Нельзя менять весовой товар на штучный")
+        # Весовые товары НЕ могут быть бонусными
+        if data.get('is_weight_based'):
+            if self.instance and hasattr(self.instance, 'unit'):
+                if data.get('unit', self.instance.unit) != 'kg':
+                    raise serializers.ValidationError(
+                        "Весовые товары должны иметь единицу измерения 'кг'"
+                    )
 
         return data
 
     def create(self, validated_data):
         uploaded_images = validated_data.pop('uploaded_images', [])
-
         product = super().create(validated_data)
 
         for idx, image in enumerate(uploaded_images):
@@ -114,7 +131,6 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         uploaded_images = validated_data.pop('uploaded_images', None)
-
         product = super().update(instance, validated_data)
 
         if uploaded_images is not None:
@@ -153,50 +169,48 @@ class ProductionItemSerializer(serializers.ModelSerializer):
 
 
 class ProductionRecordSerializer(serializers.ModelSerializer):
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
     items = ProductionItemSerializer(many=True, read_only=True)
     mechanical_expenses = MechanicalExpenseEntrySerializer(many=True, read_only=True)
 
     class Meta:
         model = ProductionRecord
-        fields = ['id', 'date', 'items', 'mechanical_expenses', 'created_at', 'updated_at']
+        fields = [
+            'id', 'partner', 'partner_name', 'date',
+            'items', 'mechanical_expenses',
+            'created_at', 'updated_at'
+        ]
 
 
 # ============= BONUS SERIALIZERS =============
 
 class BonusHistorySerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    store_name = serializers.CharField(source='store.username', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    order_id = serializers.IntegerField(source='order.id', read_only=True, allow_null=True)
 
     class Meta:
         model = BonusHistory
-        fields = ['id', 'store', 'store_name', 'product', 'product_name', 'bonus_count', 'date']
+        fields = [
+            'id', 'store', 'store_name', 'partner', 'partner_name',
+            'product', 'product_name', 'quantity', 'bonus_value',
+            'order_id', 'created_at'
+        ]
 
 
 # ============= DEFECTIVE SERIALIZERS =============
 
 class DefectiveProductSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_category = serializers.CharField(source='product.category', read_only=True)
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta:
         model = DefectiveProduct
-        fields = ['id', 'product', 'product_name', 'product_category', 'quantity', 'amount', 'reason', 'date',
-                  'created_at']
-        read_only_fields = ['partner', 'amount']
-
-    def validate(self, data):
-        product = data.get('product')
-        quantity = data.get('quantity')
-
-        # Для весовых — автоматический расчёт суммы
-        if product.category == 'weight':
-            data['amount'] = product.get_price_for_weight(quantity)
-        else:
-            # Для штучных
-            data['amount'] = product.price * quantity
-
-        return data
-
-    def create(self, validated_data):
-        validated_data['partner'] = self.context['request'].user
-        return super().create(validated_data)
+        fields = [
+            'id', 'product', 'product_name', 'partner', 'partner_name',
+            'quantity', 'reason', 'status', 'status_display',
+            'reported_at', 'resolved_at'
+        ]
+        read_only_fields = ['partner', 'reported_at', 'resolved_at']

@@ -1,249 +1,293 @@
+from decimal import Decimal
 from django.db import transaction
 from django.core.exceptions import ValidationError
-from rest_framework.exceptions import ValidationError as DRFValidationError
-from .models import Order, OrderItem, OrderHistory, OrderReturn, OrderReturnItem
-from stores.models import Store, StoreInventory
-from products.models import Product
-from products.services import BonusService, DefectiveProductService
-from stores.services import InventoryService
-from django_redis import get_redis_connection
 import uuid
 
-from decimal import Decimal, ROUND_HALF_UP
-
-Q2 = Decimal('0.01')
-
-
-def _q2(x: Decimal) -> Decimal:
-    return (x or Decimal('0')).quantize(Q2, rounding=ROUND_HALF_UP)
+from .models import (
+    PartnerOrder, PartnerOrderItem,
+    StoreOrder, StoreOrderItem,
+    OrderHistory, OrderReturn, OrderReturnItem
+)
+from products.models import Product
+from products.services import BonusService
+from stores.services import InventoryService
 
 
 class OrderService:
-    @staticmethod
-    def check_idempotency(key):
-        """Проверка идемпотентности для предотвращения дублирования"""
-        redis = get_redis_connection("default")
-        cached = redis.get(f"idempotency:{key}")
-        if cached:
-            # Возвращаем информацию о том, что запрос уже обработан
-            return {
-                'duplicate': True,
-                'order_id': cached.decode('utf-8') if cached else None
-            }
-        return {'duplicate': False}
-
-    @staticmethod
-    def set_idempotency(key, order_id):
-        """Сохраняем информацию об успешно обработанном запросе"""
-        redis = get_redis_connection("default")
-        redis.setex(f"idempotency:{key}", 3600, str(order_id))
+    """Сервис управления заказами"""
 
     @staticmethod
     @transaction.atomic
-    def create_order(store, partner, items_data, note='', idempotency_key=None):
+    def create_partner_order(partner, items_data, note='', idempotency_key=None):
+        """Создание заказа партнёра к админу"""
         if idempotency_key:
-            check_result = OrderService.check_idempotency(idempotency_key)
-            if check_result['duplicate']:
-                # Возвращаем существующий заказ
-                order_id = check_result['order_id']
-                if order_id:
-                    try:
-                        existing_order = Order.objects.get(id=int(order_id))
-                        return existing_order
-                    except Order.DoesNotExist:
-                        pass
-                # Если заказ не найден, но ключ существует
-                raise DRFValidationError({
-                    "idempotency_key": "Запрос уже обработан, но заказ не найден. Попробуйте с новым idempotency_key"
-                })
+            existing = PartnerOrder.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                return existing
 
-        order = Order.objects.create(
-            store=store,
+        order = PartnerOrder.objects.create(
             partner=partner,
             note=note,
             total_amount=Decimal('0'),
-            debt_increase=Decimal('0'),
-            idempotency_key=idempotency_key or uuid.uuid4()
+            idempotency_key=idempotency_key or str(uuid.uuid4())
         )
+
         total = Decimal('0')
-        total_quantity = Decimal('0')
+
         for item_data in items_data:
-            product = Product.objects.get(id=item_data['product'])
+            product = Product.objects.select_for_update().get(id=item_data['product'])
             quantity = Decimal(item_data['quantity'])
+
+            if product.is_weight_based:
+                product.validate_quantity(quantity)
+
             price = product.price
-            OrderItem.objects.create(
+
+            PartnerOrderItem.objects.create(
                 order=order,
                 product=product,
                 quantity=quantity,
                 price=price
             )
-            total += _q2(quantity * price)
-            total_quantity += quantity
-        order.total_amount = _q2(total)
-        order.debt_increase = Decimal('0')
-        order.save(update_fields=['total_amount', 'debt_increase'])
+
+            total += price * quantity
+
+        order.total_amount = total
+        order.save()
+
         OrderHistory.objects.create(
-            order=order,
+            order_type='partner',
+            order_id=order.id,
             type='general',
             amount=total,
-            quantity=total_quantity,
-            note='Заказ создан'
+            note=f'Создан заказ партнёра #{order.id}'
         )
-
-        # Сохраняем идемпотентность только после успешного создания
-        if idempotency_key:
-            OrderService.set_idempotency(idempotency_key, order.id)
 
         return order
 
     @staticmethod
     @transaction.atomic
-    def confirm_order(order, idempotency_key=None):
-        if idempotency_key:
-            check_result = OrderService.check_idempotency(idempotency_key)
-            if check_result['duplicate']:
-                raise DRFValidationError({
-                    "idempotency_key": "Запрос уже обработан"
-                })
-
+    def confirm_partner_order(order):
+        """Подтверждение заказа партнёра админом"""
         if order.status != 'pending':
-            raise ValueError("Заказ уже обработан")
+            raise ValidationError('Заказ уже обработан')
 
-        for item in order.items.all():
-            InventoryService.transfer_to_store(
+        for item in order.items.select_related('product'):
+            if item.product.stock_quantity < item.quantity:
+                raise ValidationError(
+                    f'Недостаточно товара {item.product.name} на складе'
+                )
+
+        for item in order.items.select_related('product'):
+            product = item.product
+            product.stock_quantity -= item.quantity
+            product.save()
+
+            InventoryService.add_to_inventory(
                 partner=order.partner,
-                store=order.store,
-                product=item.product,
+                product=product,
                 quantity=item.quantity
             )
-            if getattr(item.product, 'category', None) != 'weight':
-                bonus = BonusService.add_product_to_counter(order.store, order.partner, item.product,
-                                                            int(item.quantity))
-                if bonus > 0:
-                    OrderHistory.objects.create(
-                        order=order,
-                        type='bonus',
-                        amount=Decimal(bonus) * item.price,
-                        quantity=Decimal(bonus),
-                        product=item.product,
-                        note='Бонус получен'
-                    )
+
         order.status = 'confirmed'
-        order.debt_increase = _q2(order.total_amount)
-        order.store.debt = _q2(order.store.debt + order.total_amount)
-        order.store.save(update_fields=['debt'])
-        order.save(update_fields=['status', 'debt_increase'])
+        order.save()
+
         OrderHistory.objects.create(
-            order=order,
-            type='sold',
+            order_type='partner',
+            order_id=order.id,
+            type='general',
             amount=order.total_amount,
-            quantity=sum(item.quantity for item in order.items.all()),
-            note='Заказ подтвержден'
+            note='Заказ подтверждён админом'
         )
 
+        return order
+
+    @staticmethod
+    @transaction.atomic
+    def create_store_order_from_request(store_request, partner, idempotency_key=None):
+        """Создание заказа магазина из StoreRequest"""
         if idempotency_key:
-            OrderService.set_idempotency(idempotency_key, f"confirm_{order.id}")
+            existing = StoreOrder.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                return existing
+
+        order = StoreOrder.objects.create(
+            store=store_request.store,
+            partner=partner,
+            store_request=store_request,
+            note=store_request.note,
+            total_amount=Decimal('0'),
+            idempotency_key=idempotency_key or str(uuid.uuid4())
+        )
+
+        total = Decimal('0')
+
+        for req_item in store_request.items.filter(is_cancelled=False):
+            StoreOrderItem.objects.create(
+                order=order,
+                product=req_item.product,
+                quantity=req_item.quantity,
+                price=req_item.price,
+                is_bonus=False
+            )
+
+            total += req_item.total
+
+        bonus_applied = BonusService.apply_bonus_to_order(order)
+
+        order.total_amount = total
+        order.bonus_applied = bonus_applied
+        order.save()
+
+        OrderHistory.objects.create(
+            order_type='store',
+            order_id=order.id,
+            type='general',
+            amount=total,
+            note=f'Создан заказ магазина #{order.id}'
+        )
+
+        return order
+
+    @staticmethod
+    @transaction.atomic
+    def fulfill_store_order(order):
+        """Выполнение заказа магазина"""
+        if order.is_fulfilled:
+            raise ValidationError('Заказ уже выполнен')
+
+        store = order.store
+        partner = order.partner
+
+        for item in order.items.filter(is_bonus=False):
+            from stores.models import PartnerInventory
+            partner_inv = PartnerInventory.objects.filter(
+                partner=partner,
+                product=item.product
+            ).first()
+
+            if not partner_inv or partner_inv.quantity < item.quantity:
+                raise ValidationError(
+                    f'Недостаточно товара {item.product.name} у партнёра'
+                )
+
+        for item in order.items.select_related('product'):
+            if item.is_bonus:
+                InventoryService.add_to_inventory(
+                    store=store,
+                    product=item.product,
+                    quantity=item.quantity
+                )
+            else:
+                InventoryService.remove_from_inventory(
+                    partner=partner,
+                    product=item.product,
+                    quantity=item.quantity
+                )
+
+                InventoryService.add_to_inventory(
+                    store=store,
+                    product=item.product,
+                    quantity=item.quantity
+                )
+
+                store.debt += item.total
+
+        store.save()
+
+        order.is_fulfilled = True
+        order.save()
+
+        OrderHistory.objects.create(
+            order_type='store',
+            order_id=order.id,
+            type='general',
+            amount=order.total_amount,
+            note='Заказ выполнен'
+        )
+
+        return order
 
     @staticmethod
     @transaction.atomic
     def create_return(order, items_data, reason='', idempotency_key=None):
+        """Создание возврата товаров"""
         if idempotency_key:
-            check_result = OrderService.check_idempotency(idempotency_key)
-            if check_result['duplicate']:
-                # Возвращаем существующий возврат
-                return_id = check_result['order_id']
-                if return_id and return_id.startswith('return_'):
-                    try:
-                        existing_return = OrderReturn.objects.get(id=int(return_id.replace('return_', '')))
-                        return existing_return
-                    except OrderReturn.DoesNotExist:
-                        pass
-                raise DRFValidationError({
-                    "idempotency_key": "Запрос уже обработан"
-                })
+            existing = OrderReturn.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                return existing
 
         order_return = OrderReturn.objects.create(
             order=order,
             reason=reason,
             total_amount=Decimal('0'),
-            idempotency_key=idempotency_key or uuid.uuid4()
+            idempotency_key=idempotency_key or str(uuid.uuid4())
         )
+
         total = Decimal('0')
-        total_quantity = Decimal('0')
+
         for item_data in items_data:
             product = Product.objects.get(id=item_data['product'])
             quantity = Decimal(item_data['quantity'])
-            price = product.price
-            # Проверяем наличие в StoreInventory
-            inventory = StoreInventory.objects.filter(store=order.store, product=product).first()
-            if not inventory or inventory.quantity < quantity:
-                raise ValidationError(f"Недостаточно товара {product.name} в магазине")
+
+            order_item = order.items.filter(product=product).first()
+            if not order_item:
+                raise ValidationError(f'Товар {product.name} не был в заказе')
+
+            if quantity > order_item.quantity:
+                raise ValidationError(f'Нельзя вернуть больше чем было заказано')
+
             OrderReturnItem.objects.create(
-                return_order=order_return,
+                return_request=order_return,
                 product=product,
                 quantity=quantity,
-                price=price
+                price=order_item.price
             )
-            total += quantity * price
-            total_quantity += quantity
+
+            total += order_item.price * quantity
+
         order_return.total_amount = total
         order_return.save()
-        OrderHistory.objects.create(
-            order=order,
-            type='returned',
-            amount=total,
-            quantity=total_quantity,
-            note=f'Возврат создан: {reason}'
-        )
-
-        if idempotency_key:
-            OrderService.set_idempotency(idempotency_key, f"return_{order_return.id}")
 
         return order_return
 
-    # approve_return остается без изменений
     @staticmethod
     @transaction.atomic
     def approve_return(order_return):
+        """Подтверждение возврата"""
         if order_return.status != 'pending':
-            raise ValueError("Возврат уже обработан")
-        for item in order_return.items.all():
+            raise ValidationError('Возврат уже обработан')
+
+        order = order_return.order
+        store = order.store
+        partner = order.partner
+
+        for item in order_return.items.select_related('product'):
             InventoryService.remove_from_inventory(
-                store=order_return.order.store,
+                store=store,
                 product=item.product,
                 quantity=item.quantity
             )
+
             InventoryService.add_to_inventory(
-                partner=order_return.order.partner,
+                partner=partner,
                 product=item.product,
                 quantity=item.quantity
             )
-            line_total = _q2(item.quantity * item.price)
-            order_return.order.debt_increase = _q2(order_return.order.debt_increase - line_total)
-            order_return.order.store.debt = _q2(order_return.order.store.debt - line_total)
-            order_return.order.store.save(update_fields=['debt'])
-            order_return.order.save(update_fields=['debt_increase'])
-            if 'брак' in order_return.reason.lower():
-                DefectiveProductService.add_defective(
-                    partner=order_return.order.partner,
-                    product=item.product,
-                    quantity=item.quantity,
-                    amount=line_total,
-                )
-                OrderHistory.objects.create(
-                    order=order_return.order,
-                    type='defect',
-                    amount=line_total,
-                    quantity=item.quantity,
-                    product=item.product,
-                    note='Брак зарегистрирован'
-                )
+
+            store.debt -= item.total
+
+        store.save()
+
         order_return.status = 'approved'
         order_return.save()
+
         OrderHistory.objects.create(
-            order=order_return.order,
+            order_type='store',
+            order_id=order.id,
             type='returned',
             amount=order_return.total_amount,
-            quantity=sum(item.quantity for item in order_return.items.all()),
-            note='Возврат подтвержден'
+            note=f'Возврат #{order_return.id} подтверждён'
         )
+
+        return order_return

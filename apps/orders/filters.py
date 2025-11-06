@@ -1,20 +1,39 @@
 import django_filters
-from .models import Order
+from .models import PartnerOrder, StoreOrder, OrderReturn
 
-class OrderFilter(django_filters.FilterSet):
-    created_at_after = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="gte")
-    created_at_before = django_filters.DateTimeFilter(field_name="created_at", lookup_expr="lte")
-    total_min = django_filters.NumberFilter(field_name="total_amount", lookup_expr='gte')
-    total_max = django_filters.NumberFilter(field_name="total_amount", lookup_expr='lte')
-    city = django_filters.NumberFilter(field_name="store__city__id")
-    region = django_filters.NumberFilter(field_name="store__region__id")
-    partner = django_filters.NumberFilter(field_name="partner__id")
-    store_inn = django_filters.CharFilter(field_name="store__inn", lookup_expr='exact')
+
+class PartnerOrderFilter(django_filters.FilterSet):
+    """Фильтры для заказов партнёров"""
+    status = django_filters.ChoiceFilter(choices=PartnerOrder._meta.get_field('status').choices)
+    created_at_from = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
+    created_at_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
+    partner = django_filters.NumberFilter(field_name='partner__id')
 
     class Meta:
-        model = Order
-        fields = [
-            'store','partner','status',
-            'total_min','total_max','city','region','store_inn',
-            'created_at_after','created_at_before',
-        ]
+        model = PartnerOrder
+        fields = ['status', 'partner']
+
+
+class StoreOrderFilter(django_filters.FilterSet):
+    """Фильтры для заказов магазинов"""
+    is_fulfilled = django_filters.BooleanFilter()
+    created_at_from = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
+    created_at_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
+    store = django_filters.NumberFilter(field_name='store__id')
+    partner = django_filters.NumberFilter(field_name='partner__id')
+
+    class Meta:
+        model = StoreOrder
+        fields = ['is_fulfilled', 'store', 'partner']
+
+
+class OrderReturnFilter(django_filters.FilterSet):
+    """Фильтры для возвратов"""
+    status = django_filters.ChoiceFilter(choices=OrderReturn._meta.get_field('status').choices)
+    created_at_from = django_filters.DateFilter(field_name='created_at', lookup_expr='gte')
+    created_at_to = django_filters.DateFilter(field_name='created_at', lookup_expr='lte')
+    order = django_filters.NumberFilter(field_name='order__id')
+
+    class Meta:
+        model = OrderReturn
+        fields = ['status', 'order']
