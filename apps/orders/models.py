@@ -5,6 +5,9 @@ from django.core.validators import MinValueValidator
 from decimal import Decimal
 from django.core.exceptions import ValidationError
 
+from products.models import Product
+from stores.models import Store, StoreRequest
+
 
 class PartnerOrder(models.Model):
     """
@@ -79,7 +82,7 @@ class PartnerOrderItem(models.Model):
         verbose_name='Заказ'
     )
     product = models.ForeignKey(
-        'products.Product',
+        Product,
         on_delete=models.CASCADE,
         verbose_name='Товар'
     )
@@ -117,7 +120,7 @@ class StoreOrder(models.Model):
     Создается из StoreRequest после подтверждения партнёром
     """
     store = models.ForeignKey(
-        'stores.Store',
+        Store,
         on_delete=models.CASCADE,
         related_name='store_orders',
         verbose_name='Магазин'
@@ -133,7 +136,7 @@ class StoreOrder(models.Model):
 
     # Ссылка на запрос магазина
     store_request = models.ForeignKey(
-        'stores.StoreRequest',
+        StoreRequest,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -199,7 +202,7 @@ class StoreOrderItem(models.Model):
         verbose_name='Заказ'
     )
     product = models.ForeignKey(
-        'products.Product',
+        Product,
         on_delete=models.CASCADE,
         verbose_name='Товар'
     )
@@ -259,7 +262,7 @@ class OrderHistory(models.Model):
     )
 
     product = models.ForeignKey(
-        'products.Product',
+        Product,
         on_delete=models.SET_NULL,
         null=True,
         verbose_name='Товар'
@@ -354,7 +357,7 @@ class OrderReturnItem(models.Model):
         verbose_name='Возврат'
     )
     product = models.ForeignKey(
-        'products.Product',
+        Product,
         on_delete=models.CASCADE,
         verbose_name='Товар'
     )

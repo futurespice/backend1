@@ -200,15 +200,28 @@ SIMPLE_JWT = {
     'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
-# Spectacular (API Documentation)
+from drf_spectacular.types import OpenApiTypes
+
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'B2B Backend API',
-    'DESCRIPTION': 'Полноценная B2B система для управления заказами, магазинами и партнёрами',
-    'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'COMPONENT_SPLIT_REQUEST': True,
-    'SCHEMA_PATH_PREFIX': '/api/',
+    'ENUM_NAME_OVERRIDES': {
+        'ApprovalStatusEnum': 'stores.models.Store.approval_status',  # Для approval_status
+        'StatusEnum': 'orders.models.PartnerOrder.status',  # Для status (адаптируйте по моделям)
+        # Добавьте для всех конфликтующих: OrderReturn.status, ReturnRequest.status и т.д.
+        'OrderReturnStatusEnum': 'orders.models.OrderReturn.status',
+        'ReturnRequestStatusEnum': 'stores.models.ReturnRequest.status',
+    },
+    # ... другие настройки
 }
+
+# Spectacular (API Documentation)
+# SPECTACULAR_SETTINGS = {
+#     'TITLE': 'B2B Backend API',
+#     'DESCRIPTION': 'Полноценная B2B система для управления заказами, магазинами и партнёрами',
+#     'VERSION': '1.0.0',
+#     'SERVE_INCLUDE_SCHEMA': False,
+#     'COMPONENT_SPLIT_REQUEST': True,
+#     'SCHEMA_PATH_PREFIX': '/api/',
+# }
 
 # CORS settings
 CORS_ALLOW_ALL_ORIGINS = False
