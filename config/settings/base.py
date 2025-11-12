@@ -202,17 +202,67 @@ SIMPLE_JWT = {
 
 from drf_spectacular.types import OpenApiTypes
 
+from django.utils.translation import gettext_lazy as _
+
 SPECTACULAR_SETTINGS = {
     'ENUM_NAME_OVERRIDES': {
-        'ApprovalStatusEnum': 'stores.models.Store.approval_status',  # Для approval_status
-        'StatusEnum': 'orders.models.PartnerOrder.status',  # Для status (адаптируйте по моделям)
-        # Добавьте для всех конфликтующих: OrderReturn.status, ReturnRequest.status и т.д.
-        'OrderReturnStatusEnum': 'orders.models.OrderReturn.status',
-        'ReturnRequestStatusEnum': 'stores.models.ReturnRequest.status',
+        # ApprovalStatusEnum из Store.approval_status
+        'ApprovalStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Принят')),
+            ('rejected', _('Отклонён')),
+        ],
+        # StatusEnum из PartnerOrder.status (и аналогично для других статусов)
+        'StatusEnum': [
+            ('pending', _('Ожидает подтверждения')),
+            ('confirmed', _('Подтверждён')),
+            ('processing', _('Обработка')),
+            ('shipped', _('Отправлен')),
+            ('delivered', _('Доставлен')),
+            ('cancelled', _('Отменён')),
+        ],
+        # OrderReturnStatusEnum из OrderReturn.status
+        'OrderReturnStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Подтверждён')),
+            ('rejected', _('Отклонён')),
+        ],
+        # ReturnRequestStatusEnum из ReturnRequest.status (stores.models)
+        'ReturnRequestStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Подтверждён')),
+            ('rejected', _('Отклонён')),
+        ],
+        # Добавь для OrderHistory.type, если нужно (из models.py)
+        'OrderHistoryTypeEnum': [
+            ('general', _('Общий')),
+            ('bonus', _('Бонус')),
+            ('defect', _('Брак')),
+            ('sold', _('Проданный')),
+            ('returned', _('Возвращённый')),
+        ],
+        # Для ReportType, если используется в схеме (из отчётов models.py)
+        'ReportTypeEnum': [
+            ('sales', _('Продажи')),
+            ('debts', _('Долги')),
+            ('costs', _('Расходы')),
+            ('bonuses', _('Бонусы')),
+            ('brak', _('Брак')),  # 注意: в модели 'defects' → 'brak', проверь на опечатку
+            ('balance', _('Баланс')),
+            ('orders', _('Заказы')),
+            ('products', _('Товары')),
+            ('markup', _('Наценка')),
+        ],
+        # ... другие enum'ы, если drf-spectacular их детектит (напр. из filters или views)
     },
-    # ... другие настройки
+    # Другие настройки (оставь как есть, если работают)
+    'TITLE': 'Your API Title',
+    'DESCRIPTION': 'Your API Description',
+    'VERSION': '1.0.0',
+    # Чтобы избежать warning'ов о collisions, если enum'ы дублируются между моделями
+    'ENUM_ADD_EXPLICIT_BLANK_NULL_CHOICE': False,
+    # Если нужно, отключи хук временно для теста: 'POSTPROCESSING_HOOKS': ['drf_spectacular.hooks.postprocess_schema_enums']
 }
-
 # Spectacular (API Documentation)
 # SPECTACULAR_SETTINGS = {
 #     'TITLE': 'B2B Backend API',
