@@ -5,30 +5,16 @@ load_dotenv()
 
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '').split(',')
 
-# CSRF для продакшена - КРИТИЧНО
-CSRF_TRUSTED_ORIGINS = [
-    'https://baielapp.com.kg',
-    'https://www.baielapp.com.kg',
-    'http://baielapp.com.kg',
-    'http://www.baielapp.com.kg',
-    'http://147.45.138.17',
-]
-
 # Security
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
-X_FRAME_OPTIONS = 'DENY'
 SECURE_HSTS_SECONDS = 31536000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_SSL_REDIRECT = False  # Nginx делает редирект
-SESSION_COOKIE_SECURE = True  # Пока HTTP
-CSRF_COOKIE_SECURE = True     # Пока HTTP
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 
-# После установки SSL измени на True:
-# SESSION_COOKIE_SECURE = True
-# CSRF_COOKIE_SECURE = True
-
-# Static/Media
+# Static/Media - должны совпадать с nginx
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_ROOT = BASE_DIR / 'media'
 STATIC_URL = '/static/'

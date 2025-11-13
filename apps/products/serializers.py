@@ -1,241 +1,216 @@
 from rest_framework import serializers
-from .models import Category, Product, ProductImage, ProductCharacteristic, ProductPriceHistory
+from decimal import Decimal
 from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
 
-class CategorySerializer(serializers.ModelSerializer):
-    """Сериализатор категорий"""
+from .models import (
+    ProductCategory, Product, ProductImage, Expense, ProductExpenseRelation,
+    ProductionRecord, ProductionItem, MechanicalExpenseEntry,
+    BonusHistory, StoreProductCounter, DefectiveProduct
+)
 
-    children = serializers.SerializerMethodField()
-    products_count = serializers.ReadOnlyField(source='get_products_count')
-    full_name = serializers.ReadOnlyField()
+
+# ============= CATEGORY =============
+
+class ProductCategorySerializer(serializers.ModelSerializer):
+    parent_name = serializers.CharField(source='parent.name', read_only=True, allow_null=True)
 
     class Meta:
-        model = Category
+        model = ProductCategory
+        fields = ['id', 'name', 'description', 'parent', 'parent_name', 'is_active', 'created_at']
+
+
+# ============= EXPENSE SERIALIZERS =============
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    expense_type_display = serializers.CharField(source='get_expense_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    state_display = serializers.CharField(source='get_state_display', read_only=True)
+
+    class Meta:
+        model = Expense
         fields = [
-            'id', 'name', 'description', 'slug', 'parent', 'full_name',
-            'image', 'is_active', 'sort_order', 'children', 'products_count',
-            'created_at', 'updated_at'
+            'id', 'name', 'expense_type', 'expense_type_display',
+            'price_per_unit', 'unit', 'monthly_amount',
+            'status', 'status_display', 'state', 'state_display',
+            'apply_type', 'is_active', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['slug', 'created_at', 'updated_at']
 
-    def get_children(self, obj):
-        """Получить дочерние категории"""
-        children = obj.children.filter(is_active=True)
-        return CategorySerializer(children, many=True, context=self.context).data
+    def validate(self, data):
+        expense_type = data.get('expense_type')
 
+        if expense_type == 'physical':
+            if not data.get('price_per_unit') or not data.get('unit'):
+                raise serializers.ValidationError("Физические расходы требуют цену и единицу")
+
+        if expense_type == 'overhead':
+            if not data.get('monthly_amount'):
+                raise serializers.ValidationError("Накладные расходы требуют месячную сумму")
+
+        return data
+
+
+class ProductExpenseRelationSerializer(serializers.ModelSerializer):
+    expense_name = serializers.CharField(source='expense.name', read_only=True)
+    expense_unit = serializers.CharField(source='expense.unit', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ProductExpenseRelation
+        fields = ['id', 'expense', 'expense_name', 'expense_unit', 'proportion']
+
+
+# ============= PRODUCT SERIALIZERS =============
 
 class ProductImageSerializer(serializers.ModelSerializer):
-    """Сериализатор изображений товара"""
-
     class Meta:
         model = ProductImage
-        fields = ['id', 'image', 'title', 'sort_order']
-
-
-class ProductCharacteristicSerializer(serializers.ModelSerializer):
-    """Сериализатор характеристик товара"""
-
-    class Meta:
-        model = ProductCharacteristic
-        fields = ['id', 'name', 'value', 'unit', 'sort_order']
+        fields = ['id', 'image', 'position']
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    """Сериализатор списка товаров (краткая информация)"""
-
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    is_in_stock = serializers.ReadOnlyField()
-    is_low_stock = serializers.ReadOnlyField()
-    profit_margin = serializers.ReadOnlyField()
+    images = ProductImageSerializer(many=True, read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'article', 'slug', 'category', 'category_name',
-            'price', 'unit', 'stock_quantity', 'main_image',
-            'is_active', 'is_available', 'is_in_stock', 'is_low_stock',
-            'is_bonus_eligible', 'profit_margin', 'created_at'
+            'id', 'name', 'description', 'category', 'category_name',
+            'unit', 'unit_display', 'price', 'is_weight_based',
+            'is_active', 'is_available', 'stock_quantity',
+            'images', 'created_at'
         ]
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
-    """Детальный сериализатор товара"""
-
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    category_full_name = serializers.CharField(source='category.full_name', read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
-    characteristics = ProductCharacteristicSerializer(many=True, read_only=True)
+    expense_relations = ProductExpenseRelationSerializer(many=True, read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
-    # Computed fields
-    is_in_stock = serializers.ReadOnlyField()
-    is_low_stock = serializers.ReadOnlyField()
-    profit_margin = serializers.ReadOnlyField()
-    profit_amount = serializers.ReadOnlyField()
-
-    class Meta:
-        model = Product
-        fields = [
-            'id', 'name', 'description', 'article', 'slug',
-            'category', 'category_name', 'category_full_name',
-            'price', 'cost_price', 'unit', 'stock_quantity', 'low_stock_threshold',
-            'is_bonus_eligible', 'bonus_points', 'main_image', 'images',
-            'weight', 'volume', 'characteristics',
-            'is_active', 'is_available', 'is_in_stock', 'is_low_stock',
-            'production_time_days', 'shelf_life_days',
-            'profit_margin', 'profit_amount',
-            'created_at', 'updated_at', 'created_by'
-        ]
-        read_only_fields = ['slug', 'created_at', 'updated_at', 'created_by']
-
-
-class ProductCreateUpdateSerializer(serializers.ModelSerializer):
-    """Сериализатор создания/обновления товара"""
-
-    characteristics = ProductCharacteristicSerializer(many=True, required=False)
+    uploaded_images = serializers.ListField(
+        child=serializers.ImageField(),
+        write_only=True,
+        required=False
+    )
 
     class Meta:
         model = Product
         fields = [
-            'name', 'description', 'category', 'price', 'cost_price', 'unit',
-            'stock_quantity', 'low_stock_threshold', 'is_bonus_eligible', 'bonus_points',
-            'main_image', 'weight', 'volume', 'is_active', 'is_available',
-            'production_time_days', 'shelf_life_days', 'characteristics'
+            'id', 'name', 'description', 'category', 'category_name',
+            'unit', 'unit_display', 'price', 'price_per_100g', 'cost_price',
+            'is_weight_based', 'is_active', 'is_available',
+            'stock_quantity', 'image', 'images', 'uploaded_images',
+            'expense_relations', 'created_at', 'updated_at'
         ]
+
+    def validate_uploaded_images(self, value):
+        if len(value) > 3:
+            raise serializers.ValidationError("Максимум 3 изображения")
+        return value
+
+    def validate(self, data):
+        # Весовые товары НЕ могут быть бонусными
+        if data.get('is_weight_based'):
+            if self.instance and hasattr(self.instance, 'unit'):
+                if data.get('unit', self.instance.unit) != 'kg':
+                    raise serializers.ValidationError(
+                        "Весовые товары должны иметь единицу измерения 'кг'"
+                    )
+
+        return data
 
     def create(self, validated_data):
-        """Создание товара с характеристиками"""
-        characteristics_data = validated_data.pop('characteristics', [])
+        uploaded_images = validated_data.pop('uploaded_images', [])
+        product = super().create(validated_data)
 
-        # Устанавливаем создателя
-        validated_data['created_by'] = self.context['request'].user
-
-        product = Product.objects.create(**validated_data)
-
-        # Создаем характеристики
-        for char_data in characteristics_data:
-            ProductCharacteristic.objects.create(product=product, **char_data)
+        for idx, image in enumerate(uploaded_images):
+            ProductImage.objects.create(product=product, image=image, position=idx)
 
         return product
 
     def update(self, instance, validated_data):
-        """Обновление товара"""
-        characteristics_data = validated_data.pop('characteristics', [])
-
-        # Сохраняем старую цену для истории
-        old_price = instance.price
-        new_price = validated_data.get('price', old_price)
-
-        # Обновляем товар
+        uploaded_images = validated_data.pop('uploaded_images', None)
         product = super().update(instance, validated_data)
 
-        # Записываем историю изменения цены
-        if old_price != new_price:
-            ProductPriceHistory.objects.create(
-                product=product,
-                old_price=old_price,
-                new_price=new_price,
-                changed_by=self.context['request'].user,
-                reason='Обновление через API'
-            )
-
-        # Обновляем характеристики
-        if characteristics_data:
-            # Удаляем старые характеристики
-            product.characteristics.all().delete()
-
-            # Создаем новые
-            for char_data in characteristics_data:
-                ProductCharacteristic.objects.create(product=product, **char_data)
+        if uploaded_images is not None:
+            product.images.all().delete()
+            for idx, image in enumerate(uploaded_images):
+                ProductImage.objects.create(product=product, image=image, position=idx)
 
         return product
 
 
-class ProductPriceHistorySerializer(serializers.ModelSerializer):
-    """Сериализатор истории цен"""
+# ============= PRODUCTION SERIALIZERS =============
 
-    changed_by_name = serializers.CharField(source='changed_by.get_full_name', read_only=True)
+class MechanicalExpenseEntrySerializer(serializers.ModelSerializer):
+    expense_name = serializers.CharField(source='expense.name', read_only=True)
 
     class Meta:
-        model = ProductPriceHistory
+        model = MechanicalExpenseEntry
+        fields = ['id', 'expense', 'expense_name', 'amount_spent']
+
+
+class ProductionItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    class Meta:
+        model = ProductionItem
         fields = [
-            'id', 'old_price', 'new_price', 'changed_by', 'changed_by_name',
-            'reason', 'created_at'
+            'id', 'product', 'product_name',
+            'quantity_produced', 'suzerain_amount',
+            'ingredient_cost', 'overhead_cost', 'total_cost',
+            'cost_price', 'revenue', 'net_profit'
+        ]
+        read_only_fields = [
+            'ingredient_cost', 'overhead_cost', 'total_cost',
+            'cost_price', 'revenue', 'net_profit'
         ]
 
 
-class ProductCatalogSerializer(serializers.ModelSerializer):
-    """Сериализатор каталога товаров для магазинов"""
-
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    available_quantity = serializers.SerializerMethodField()
-    in_cart = serializers.SerializerMethodField()
+class ProductionRecordSerializer(serializers.ModelSerializer):
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    items = ProductionItemSerializer(many=True, read_only=True)
+    mechanical_expenses = MechanicalExpenseEntrySerializer(many=True, read_only=True)
 
     class Meta:
-        model = Product
+        model = ProductionRecord
         fields = [
-            'id', 'name', 'description', 'price', 'unit', 'category_name',
-            'main_image', 'is_bonus_eligible', 'available_quantity', 'in_cart'
+            'id', 'partner', 'partner_name', 'date',
+            'items', 'mechanical_expenses',
+            'created_at', 'updated_at'
         ]
 
-    def get_available_quantity(self, obj):
-        """Доступное количество на складе партнёра"""
-        # TODO: Реализовать логику получения остатков у партнёра
-        return float(obj.stock_quantity)
 
-    def get_in_cart(self, obj):
-        """Проверить, есть ли товар в корзине"""
-        # TODO: Реализовать логику корзины
-        return False
+# ============= BONUS SERIALIZERS =============
 
+class BonusHistorySerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    order_id = serializers.IntegerField(source='order.id', read_only=True, allow_null=True)
 
-class ProductStockUpdateSerializer(serializers.Serializer):
-    """Сериализатор обновления остатков"""
-
-    product_id = serializers.IntegerField()
-    quantity = serializers.DecimalField(max_digits=10, decimal_places=3)
-    operation = serializers.ChoiceField(choices=['add', 'subtract', 'set'])
-    reason = serializers.CharField(max_length=200, required=False)
-
-    def validate_product_id(self, value):
-        """Проверяем существование товара"""
-        try:
-            Product.objects.get(id=value)
-        except Product.DoesNotExist:
-            raise serializers.ValidationError("Товар не найден")
-        return value
-
-    def validate_quantity(self, value):
-        """Проверяем количество"""
-        if value < 0:
-            raise serializers.ValidationError("Количество не может быть отрицательным")
-        return value
+    class Meta:
+        model = BonusHistory
+        fields = [
+            'id', 'store', 'store_name', 'partner', 'partner_name',
+            'product', 'product_name', 'quantity', 'bonus_value',
+            'order_id', 'created_at'
+        ]
 
 
-class ProductAnalyticsSerializer(serializers.Serializer):
-    """Сериализатор аналитики по товарам"""
+# ============= DEFECTIVE SERIALIZERS =============
 
-    total_products = serializers.IntegerField()
-    active_products = serializers.IntegerField()
-    low_stock_products = serializers.IntegerField()
-    out_of_stock_products = serializers.IntegerField()
-    average_price = serializers.DecimalField(max_digits=10, decimal_places=2)
-    total_stock_value = serializers.DecimalField(max_digits=15, decimal_places=2)
-    top_categories = serializers.ListField()
-    price_ranges = serializers.DictField()
+class DefectiveProductSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
-    @extend_schema_field({"type": "string"})
-    def full_name(self, obj) -> str:
-        return obj.get_full_name()
-
-    @extend_schema_field({"type": "boolean"})
-    def is_in_stock(self, obj) -> bool:
-        return obj.stock_quantity > 0
-
-    @extend_schema_field({"type": "number", "format": "float"})
-    def profit_margin(self, obj) -> float:
-        return obj.get_profit_margin()
-
-    # apps/stores/serializers.py
-    @extend_schema_field({"type": "object"})
-    def get_coordinates(self, obj) -> dict:
-        return obj.get_coordinates()
+    class Meta:
+        model = DefectiveProduct
+        fields = [
+            'id', 'product', 'product_name', 'partner', 'partner_name',
+            'quantity', 'reason', 'status', 'status_display',
+            'reported_at', 'resolved_at'
+        ]
+        read_only_fields = ['partner', 'reported_at', 'resolved_at']

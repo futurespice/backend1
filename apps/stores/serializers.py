@@ -1,251 +1,215 @@
+# apps/stores/serializers.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from rest_framework import serializers
-from django.contrib.auth import get_user_model
-from .models import Store, StoreInventory, StoreRequest, AdminInventory
+from decimal import Decimal
+from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.types import OpenApiTypes
+
+from .models import (
+    Region, City, Store, StoreSelection,
+    StoreProductRequest, StoreRequest, StoreRequestItem,
+    StoreInventory, PartnerInventory, ReturnRequest, ReturnRequestItem
+)
 from products.models import Product
-from regions.models import Region
 
-User = get_user_model()
 
+# ============= REGION & CITY =============
+
+class CitySerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #4: Сериализатор города"""
+    region_name = serializers.CharField(source='region.name', read_only=True)
+
+    class Meta:
+        model = City
+        fields = ['id', 'name', 'region', 'region_name']
+
+
+class RegionSerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #4: Сериализатор региона с городами"""
+    cities = CitySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Region
+        fields = ['id', 'name', 'cities']
+
+
+# ============= STORE =============
 
 class StoreSerializer(serializers.ModelSerializer):
     """Сериализатор магазина"""
-
-    user_name = serializers.CharField(source='user.get_full_name', read_only=True)
-    user_phone = serializers.CharField(source='user.phone', read_only=True)
-    user_email = serializers.CharField(source='user.email', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    region_name = serializers.CharField(source='region.full_name', read_only=True)
-    total_debt = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
-    orders_count = serializers.IntegerField(read_only=True)
-    coordinates = serializers.SerializerMethodField()
+    region_name = serializers.CharField(source='region.name', read_only=True)
+    city_name = serializers.CharField(source='city.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    approval_status_display = serializers.CharField(source='get_approval_status_display', read_only=True)
 
     class Meta:
         model = Store
         fields = [
-            'id', 'store_name', 'address', 'latitude', 'longitude',
-            'region', 'region_name', 'partner', 'partner_name',
-            'user_name', 'user_phone', 'user_email',
-            'total_debt', 'orders_count', 'coordinates',
-            'is_active', 'created_at', 'updated_at'
+            'id', 'name', 'inn', 'owner_name', 'phone',
+            'region', 'region_name', 'city', 'city_name',
+            'address', 'latitude', 'longitude',
+            'debt', 'approval_status', 'approval_status_display',
+            'is_active', 'created_by', 'created_by_name',
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-    def get_coordinates(self, obj):
-        return obj.get_coordinates()
+        read_only_fields = ['debt', 'created_by', 'created_at', 'updated_at']
 
 
-class StoreCreateUpdateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания/обновления магазина"""
+class StoreSelectionSerializer(serializers.ModelSerializer):
+    """Выбор магазина"""
+    store_name = serializers.CharField(source='store.name', read_only=True)
 
     class Meta:
-        model = Store
+        model = StoreSelection
+        fields = ['id', 'store', 'store_name', 'selected_at']
+
+
+# ============= PRODUCT REQUESTS =============
+
+class StoreProductRequestSerializer(serializers.ModelSerializer):
+    """Запрос на товар (временная корзина)"""
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_price = serializers.DecimalField(
+        source='product.price',
+        max_digits=10,
+        decimal_places=2,
+        read_only=True
+    )
+
+    # ИСПРАВЛЕНИЕ #19: типизация для @extend_schema_field
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость"""
+        return obj.quantity * obj.product.price
+
+    total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StoreProductRequest
         fields = [
-            'store_name', 'address', 'latitude', 'longitude',
-            'region', 'partner'
+            'id', 'store', 'product', 'product_name',
+            'product_price', 'quantity', 'total',
+            'created_at'
+        ]
+        read_only_fields = ['store', 'created_at']
+
+
+# ============= STORE REQUESTS =============
+
+class StoreRequestItemSerializer(serializers.ModelSerializer):
+    """Позиция в запросе магазина"""
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость позиции"""
+        return obj.total
+
+    total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StoreRequestItem
+        fields = [
+            'id', 'product', 'product_name',
+            'quantity', 'price', 'total', 'is_cancelled'
         ]
 
-    def validate_partner(self, value):
-        if value and value.role != 'partner':
-            raise serializers.ValidationError("Пользователь должен быть партнёром")
-        return value
 
-    def validate_region(self, value):
-        if value and not value.is_active:
-            raise serializers.ValidationError("Регион неактивен")
-        return value
+class StoreRequestSerializer(serializers.ModelSerializer):
+    """История запросов магазина"""
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    items = StoreRequestItemSerializer(many=True, read_only=True)
 
+    class Meta:
+        model = StoreRequest
+        fields = [
+            'id', 'store', 'store_name', 'created_by', 'created_by_name',
+            'total_amount', 'note', 'items', 'created_at'
+        ]
+        read_only_fields = ['total_amount', 'created_at']
+
+
+class CreateStoreRequestSerializer(serializers.Serializer):
+    """
+    ИСПРАВЛЕНИЕ #11: Создание запроса с idempotency_key
+    """
+    note = serializers.CharField(required=False, allow_blank=True)
+    idempotency_key = serializers.CharField(required=False, allow_null=True)
+
+
+# ============= INVENTORY =============
 
 class StoreInventorySerializer(serializers.ModelSerializer):
-    """Сериализатор остатков в магазине"""
-
+    """ИСПРАВЛЕНИЕ #9: Инвентарь магазина"""
+    store_name = serializers.CharField(source='store.name', read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_unit = serializers.CharField(source='product.unit', read_only=True)
-    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
-    available_quantity = serializers.DecimalField(max_digits=8, decimal_places=3, read_only=True)
+    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total_price(self, obj) -> Decimal:
+        """Общая стоимость"""
+        return obj.total_price
+
+    total_price = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreInventory
         fields = [
-            'id', 'product', 'product_name', 'product_unit', 'product_price',
-            'quantity', 'reserved_quantity', 'available_quantity',
-            'last_updated'
+            'id', 'store', 'store_name', 'product', 'product_name',
+            'product_unit', 'quantity', 'total_price', 'last_updated'
         ]
-        read_only_fields = ['id', 'last_updated']
 
 
-# apps/stores/serializers.py - исправляем сериализатор
-class StoreRequestItemSerializer(serializers.ModelSerializer):
-    """Сериализатор позиции запроса"""
-
+class PartnerInventorySerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #9: Инвентарь партнёра"""
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
     product_name = serializers.CharField(source='product.name', read_only=True)
-    product_unit = serializers.CharField(source='product.unit', read_only=True)
-    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
+    product_unit = serializers.CharField(source='product.get_unit_display', read_only=True)
 
     class Meta:
-        model = AdminInventory  # используем существующую модель
+        model = PartnerInventory
         fields = [
-            'id', 'product', 'product_name', 'product_unit', 'product_price',
-            'quantity', 'approved_quantity', 'delivered_quantity'
-        ]
-        read_only_fields = ['id']
-
-class StoreRequestSerializer(serializers.ModelSerializer):
-    """Сериализатор запроса товаров"""
-
-    store_name = serializers.CharField(source='store.store_name', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    items = StoreRequestItemSerializer(many=True, read_only=True)
-    total_items = serializers.IntegerField(read_only=True)
-    total_quantity = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
-
-    class Meta:
-        model = StoreRequest
-        fields = [
-            'id', 'store', 'store_name', 'partner', 'partner_name',
-            'status', 'items', 'total_items', 'total_quantity',
-            'requested_at', 'processed_at', 'delivered_at',
-            'store_notes', 'partner_notes'
-        ]
-        read_only_fields = ['id', 'requested_at', 'processed_at', 'delivered_at']
-
-
-class StoreRequestCreateSerializer(serializers.ModelSerializer):
-    """Сериализатор для создания запроса товаров"""
-
-    items = StoreRequestItemSerializer(many=True, write_only=True)
-
-    class Meta:
-        model = StoreRequest
-        fields = ['partner', 'store_notes', 'items']
-
-    def validate_items(self, value):
-        if not value:
-            raise serializers.ValidationError("Список товаров не может быть пустым")
-
-        # Проверяем уникальность товаров
-        product_ids = [item['product'].id for item in value]
-        if len(product_ids) != len(set(product_ids)):
-            raise serializers.ValidationError("Товары в запросе должны быть уникальными")
-
-        return value
-
-    # apps/stores/serializers.py - исправляем create метод
-    def create(self, validated_data):
-        items_data = validated_data.pop('items')
-
-        store = self.context['request'].user.store_profile
-        validated_data['store'] = store
-
-        request = StoreRequest.objects.create(**validated_data)
-
-        # Создаём позиции
-        for item_data in items_data:
-            AdminInventory.objects.create(request=request, **item_data)
-
-        return request
-
-
-class StoreRequestUpdateSerializer(serializers.ModelSerializer):
-    """Сериализатор для обновления запроса (только для партнёров)"""
-
-    class Meta:
-        model = StoreRequest
-        fields = ['status', 'partner_notes']
-
-    def validate_status(self, value):
-        current_status = self.instance.status
-
-        # Проверяем допустимые переходы статуса
-        allowed_transitions = {
-            'pending': ['approved', 'rejected'],
-            'approved': ['delivered', 'cancelled'],
-            'rejected': [],
-            'delivered': [],
-            'cancelled': []
-        }
-
-        if value not in allowed_transitions.get(current_status, []):
-            raise serializers.ValidationError(
-                f"Недопустимый переход статуса с '{current_status}' на '{value}'"
-            )
-
-        return value
-
-    def update(self, instance, validated_data):
-        # Обновляем статус
-        new_status = validated_data.get('status')
-
-        if new_status == 'approved':
-            instance.approve(self.context['request'].user)
-        elif new_status == 'rejected':
-            reason = validated_data.get('partner_notes', '')
-            instance.reject(self.context['request'].user, reason)
-        else:
-            # Обычное обновление
-            for attr, value in validated_data.items():
-                setattr(instance, attr, value)
-            instance.save()
-
-        return instance
-
-
-class StoreProfileSerializer(serializers.ModelSerializer):
-    """Сериализатор профиля магазина для текущего пользователя"""
-
-    user_info = serializers.SerializerMethodField()
-    region_name = serializers.CharField(source='region.full_name', read_only=True)
-    partner_name = serializers.CharField(source='partner.get_full_name', read_only=True)
-    partner_phone = serializers.CharField(source='partner.phone', read_only=True)
-    total_debt = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
-    orders_count = serializers.IntegerField(read_only=True)
-    coordinates = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Store
-        fields = [
-            'id', 'store_name', 'address', 'latitude', 'longitude',
-            'region', 'region_name', 'partner_name', 'partner_phone',
-            'user_info', 'total_debt', 'orders_count', 'coordinates',
-            'is_active', 'created_at'
-        ]
-        read_only_fields = ['id', 'created_at', 'is_active']
-
-    def get_user_info(self, obj):
-        return {
-            'name': obj.user.name,
-            'second_name': obj.user.second_name,
-            'email': obj.user.email,
-            'phone': obj.user.phone,
-            'role': obj.user.role
-        }
-
-    def get_coordinates(self, obj):
-        return obj.get_coordinates()
-
-
-class ProductCatalogSerializer(serializers.ModelSerializer):
-    """Сериализатор каталога товаров для магазинов"""
-
-    available_quantity = serializers.SerializerMethodField()
-    in_cart = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Product
-        fields = [
-            'id', 'name', 'description', 'price', 'unit',
-            'category', 'available_quantity', 'in_cart',
-            'images', 'is_available'
+            'id', 'partner', 'partner_name', 'product', 'product_name',
+            'product_unit', 'quantity', 'last_updated'
         ]
 
-    def get_available_quantity(self, obj):
-        """Получить доступное количество товара на складе партнёра"""
-        # Здесь будет логика получения остатков у партнёра
-        return obj.stock_quantity
 
-    def get_in_cart(self, obj):
-        """Проверить, есть ли товар в корзине"""
-        request = self.context.get('request')
-        if request and hasattr(request, 'user') and request.user.is_authenticated:
-            # Здесь будет логика проверки корзины
-            return False
-        return False
+# ============= RETURN REQUESTS =============
+
+class ReturnRequestItemSerializer(serializers.ModelSerializer):
+    """Позиция в возврате"""
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
+    # ИСПРАВЛЕНИЕ #19: типизация
+    @extend_schema_field(OpenApiTypes.DECIMAL)
+    def get_total(self, obj) -> Decimal:
+        """Общая стоимость позиции"""
+        return obj.total
+
+    total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReturnRequestItem
+        fields = [
+            'id', 'product', 'product_name',
+            'quantity', 'price', 'total'
+        ]
+
+
+class ReturnRequestSerializer(serializers.ModelSerializer):
+    """ИСПРАВЛЕНИЕ #8: Запрос на возврат"""
+    partner_name = serializers.CharField(source='partner.name', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True, allow_null=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    items = ReturnRequestItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ReturnRequest
+        fields = [
+            'id', 'partner', 'partner_name', 'store', 'store_name',
+            'order', 'status', 'status_display', 'total_amount',
+            'reason', 'items', 'created_at'
+        ]
+        read_only_fields = ['partner', 'total_amount', 'status', 'created_at']

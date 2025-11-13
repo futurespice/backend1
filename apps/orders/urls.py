@@ -1,18 +1,24 @@
-# apps/orders/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    OrderViewSet, OrderItemViewSet, ProductRequestViewSet,
-    BonusCalculationView, OrderCreateView
+    PartnerOrderViewSet, StoreOrderViewSet,
+    OrderHistoryViewSet, OrderReturnViewSet
 )
+from rest_framework.routers import DefaultRouter
+from orders import views
 
 router = DefaultRouter()
-router.register(r'orders', OrderViewSet, basename='orders')
-router.register(r'order-items', OrderItemViewSet, basename='order-items')
-router.register(r'product-requests', ProductRequestViewSet, basename='product-requests')
+router.register(r'partner-orders', views.PartnerOrderViewSet)
+router.register(r'store-orders', views.StoreOrderViewSet)
+router.register(r'order-history', views.OrderHistoryViewSet)
+router.register(r'order-returns', views.OrderReturnViewSet)
+
+router = DefaultRouter()
+router.register('partner-orders', PartnerOrderViewSet, basename='partner-order')
+router.register('store-orders', StoreOrderViewSet, basename='store-order')
+router.register('history', OrderHistoryViewSet, basename='order-history')
+router.register('returns', OrderReturnViewSet, basename='order-return')
 
 urlpatterns = [
-    path('create/', OrderCreateView.as_view(), name='order-create'),
-    path('bonus/calculate/', BonusCalculationView.as_view(), name='order-bonus-calculate'),
     path('', include(router.urls)),
 ]

@@ -45,14 +45,9 @@ LOCAL_APPS = [
     'products',
     'orders',
     'debts',
-    'bonuses',
-    'cost_accounting',
     'reports',
-    'regions',
     'messaging',
-    'tracking',
-    'support_requests',
-    'geo',
+
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -88,12 +83,24 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-
+# DATABASES = {
+#     'default': dj_database_url.config(
+#         default=os.environ.get('DATABASE_URL', 'postgres://baiel_app:12345678@db:5432/baielapp_2'),
+#         conn_max_age=600,
+#         conn_health_checks=True,
+#     )
+# }
 DATABASES = {
-    'default': dj_database_url.parse(
-        os.environ.get('DATABASE_URL', 'postgres://baeil_app:12345678@db:5432/baielapp_2')
-    )
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
 }
+# DATABASES = {
+#     'default': dj_database_url.parse(
+#         os.environ.get('DATABASE_URL', 'postgres://baeil_app:12345678@db:5432/baielapp_2')
+#     )
+# }
 # Database (будет переопределено в production для PostgreSQL)
 # DATABASES = {
 #     'default': {
@@ -193,15 +200,78 @@ SIMPLE_JWT = {
     'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
-# Spectacular (API Documentation)
+from drf_spectacular.types import OpenApiTypes
+
+from django.utils.translation import gettext_lazy as _
+
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'B2B Backend API',
-    'DESCRIPTION': 'Полноценная B2B система для управления заказами, магазинами и партнёрами',
+    'ENUM_NAME_OVERRIDES': {
+        # ApprovalStatusEnum из Store.approval_status
+        'ApprovalStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Принят')),
+            ('rejected', _('Отклонён')),
+        ],
+        # StatusEnum из PartnerOrder.status (и аналогично для других статусов)
+        'StatusEnum': [
+            ('pending', _('Ожидает подтверждения')),
+            ('confirmed', _('Подтверждён')),
+            ('processing', _('Обработка')),
+            ('shipped', _('Отправлен')),
+            ('delivered', _('Доставлен')),
+            ('cancelled', _('Отменён')),
+        ],
+        # OrderReturnStatusEnum из OrderReturn.status
+        'OrderReturnStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Подтверждён')),
+            ('rejected', _('Отклонён')),
+        ],
+        # ReturnRequestStatusEnum из ReturnRequest.status (stores.models)
+        'ReturnRequestStatusEnum': [
+            ('pending', _('Ожидает')),
+            ('approved', _('Подтверждён')),
+            ('rejected', _('Отклонён')),
+        ],
+        # Добавь для OrderHistory.type, если нужно (из models.py)
+        'OrderHistoryTypeEnum': [
+            ('general', _('Общий')),
+            ('bonus', _('Бонус')),
+            ('defect', _('Брак')),
+            ('sold', _('Проданный')),
+            ('returned', _('Возвращённый')),
+        ],
+        # Для ReportType, если используется в схеме (из отчётов models.py)
+        'ReportTypeEnum': [
+            ('sales', _('Продажи')),
+            ('debts', _('Долги')),
+            ('costs', _('Расходы')),
+            ('bonuses', _('Бонусы')),
+            ('brak', _('Брак')),  # 注意: в модели 'defects' → 'brak', проверь на опечатку
+            ('balance', _('Баланс')),
+            ('orders', _('Заказы')),
+            ('products', _('Товары')),
+            ('markup', _('Наценка')),
+        ],
+        # ... другие enum'ы, если drf-spectacular их детектит (напр. из filters или views)
+    },
+    # Другие настройки (оставь как есть, если работают)
+    'TITLE': 'Your API Title',
+    'DESCRIPTION': 'Your API Description',
     'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'COMPONENT_SPLIT_REQUEST': True,
-    'SCHEMA_PATH_PREFIX': '/api/',
+    # Чтобы избежать warning'ов о collisions, если enum'ы дублируются между моделями
+    'ENUM_ADD_EXPLICIT_BLANK_NULL_CHOICE': False,
+    # Если нужно, отключи хук временно для теста: 'POSTPROCESSING_HOOKS': ['drf_spectacular.hooks.postprocess_schema_enums']
 }
+# Spectacular (API Documentation)
+# SPECTACULAR_SETTINGS = {
+#     'TITLE': 'B2B Backend API',
+#     'DESCRIPTION': 'Полноценная B2B система для управления заказами, магазинами и партнёрами',
+#     'VERSION': '1.0.0',
+#     'SERVE_INCLUDE_SCHEMA': False,
+#     'COMPONENT_SPLIT_REQUEST': True,
+#     'SCHEMA_PATH_PREFIX': '/api/',
+# }
 
 # CORS settings
 CORS_ALLOW_ALL_ORIGINS = False
@@ -222,16 +292,18 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@b2b-system.com')
 
 # Cache configuration
+# Redis для кэша
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+        'LOCATION': 'redis://redis:6379/1',
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-        }
+        },
+        'KEY_PREFIX': 'b2b',
+        'TIMEOUT': 300,
     }
 }
-
 # Celery Configuration
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://127.0.0.1:6379/0')
@@ -241,46 +313,40 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_ENABLE_UTC = True
 
+# Logging - безопасный вариант для Docker
 LOGS_DIR = BASE_DIR / 'logs'
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Logging
+try:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    pass  # В Docker директория уже создана
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
         'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
+            'format': '{levelname} {asctime} {module} {message}',
             'style': '{',
         },
     },
     'handlers': {
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs' / 'django.log',
-            'formatter': 'verbose',
-        },
         'console': {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
-            'formatter': 'simple',
+            'formatter': 'verbose',
         },
     },
     'loggers': {
         'django': {
-            'handlers': ['file', 'console'],
+            'handlers': ['console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
         },
         'apps': {
-            'handlers': ['file', 'console'],
+            'handlers': ['console'],
             'level': 'DEBUG',
-            'propagate': True,
+            'propagate': False,
         },
     },
 }

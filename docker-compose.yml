@@ -1,24 +1,27 @@
-version: '3.8'
-
 services:
-  # PostgreSQL Database
   db:
     image: postgres:15-alpine
+    container_name: baiel_postgres
     environment:
-      POSTGRES_DB: baielapp_2
-      POSTGRES_USER: baeil_app
-      POSTGRES_PASSWORD: 12345678
+      POSTGRES_DB: ${POSTGRES_DB:-baielapp_2}
+      POSTGRES_USER: ${POSTGRES_USER:-baiel_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-12345678}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "5432:5432"
     restart: unless-stopped
     networks:
       - baiel_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baiel_app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # Redis для кеша и Celery
   redis:
     image: redis:7-alpine
+    container_name: baiel_redis
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -27,67 +30,66 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # Django приложение
   web:
     build: .
+    container_name: baiel_web
     command: >
       sh -c "python manage.py migrate &&
              python manage.py collectstatic --noinput &&
              python manage.py runserver 0.0.0.0:8000"
     volumes:
       - .:/app
-      - static_volume:/app/staticfiles
-      - media_volume:/app/media
+      - ./staticfiles:/app/staticfiles
+      - ./media:/app/media
     ports:
       - "8000:8000"
     depends_on:
-      - db
-      - redis
-    environment:
-      - DEBUG=True
-      - SECRET_KEY=django-secret-key-baielapp-2025
-      - DATABASE_URL=postgres://baeil_app:12345678@db:5432/baielapp_2
-      - REDIS_URL=redis://redis:6379/1
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     restart: unless-stopped
     networks:
       - baiel_network
 
-  # Celery worker
   celery:
     build: .
+    container_name: baiel_celery
     command: celery -A config worker -l info
     volumes:
       - .:/app
     depends_on:
-      - db
-      - redis
-    environment:
-      - DEBUG=False
-      - SECRET_KEY=django-secret-key-baielapp-2025
-      - DATABASE_URL=postgres://baeil_app:12345678@db:5432/baielapp_2
-      - REDIS_URL=redis://redis:6379/1
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     restart: unless-stopped
     networks:
       - baiel_network
 
-  # Celery beat (планировщик задач)
   celery-beat:
     build: .
+    container_name: baiel_celery_beat
     command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
       - .:/app
     depends_on:
-      - db
-      - redis
-    environment:
-      - DEBUG=False
-      - SECRET_KEY=django-secret-key-baielapp-2025
-      - DATABASE_URL=postgres://baeil_app:12345678@db:5432/baielapp_2
-      - REDIS_URL=redis://redis:6379/1
-      - CELERY_BROKER_URL=redis://redis:6379/0
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     restart: unless-stopped
     networks:
       - baiel_network
@@ -95,8 +97,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  static_volume:
-  media_volume:
 
 networks:
   baiel_network:
