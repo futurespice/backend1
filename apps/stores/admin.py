@@ -1,6 +1,7 @@
 # apps/stores/admin.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from django.contrib import admin
 from django.utils.html import format_html
+from django import forms
 from decimal import Decimal
 from .models import (
     Region, City, Store, StoreSelection,
@@ -22,8 +23,34 @@ class CityAdmin(admin.ModelAdmin):
     search_fields = ['name']
 
 
+class StoreAdminForm(forms.ModelForm):
+    """
+    Кастомная форма для магазина с валидацией региона/города
+    """
+    class Meta:
+        model = Store
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        region = cleaned_data.get('region')
+        city = cleaned_data.get('city')
+
+        # Проверяем что город принадлежит региону
+        if region and city:
+            if city.region_id != region.id:
+                raise forms.ValidationError({
+                    'city': f'Город {city.name} не принадлежит региону {region.name}. '
+                            f'Этот город находится в регионе {city.region.name}. '
+                            f'Пожалуйста, выберите город из региона {region.name}.'
+                })
+
+        return cleaned_data
+
+
 @admin.register(Store)
 class StoreAdmin(admin.ModelAdmin):
+    form = StoreAdminForm
     list_display = [
         'name', 'inn', 'owner_name', 'phone',
         'city', 'approval_status', 'debt', 'is_active'

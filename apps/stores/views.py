@@ -190,6 +190,7 @@ class StoreViewSet(viewsets.ModelViewSet):
 class StoreSelectionViewSet(viewsets.ModelViewSet):
     """
     Выбор магазина пользователем (роль STORE)
+    POST/PATCH - выбрать/сменить магазин (update_or_create)
     """
     serializer_class = StoreSelectionSerializer
     permission_classes = [IsAuthenticated, IsStoreUser]
@@ -197,7 +198,44 @@ class StoreSelectionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return StoreSelection.objects.filter(user=self.request.user)
 
-    def perform_create(self, serializer):
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        """
+        Создать или обновить выбор магазина (вход в магазин)
+        Использует update_or_create для поддержки OneToOneField
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        store = serializer.validated_data.get('store')
+
+        # Проверяем что магазин одобрен
+        if store.approval_status != 'approved':
+            return Response(
+                {'error': 'Магазин не одобрен администратором'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Создаем или обновляем выбор магазина
+        selection, created = StoreSelection.objects.update_or_create(
+            user=request.user,
+            defaults={'store': store}
+        )
+
+        response_serializer = self.get_serializer(selection)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        )
+
+    def perform_update(self, serializer):
+        """Обновление выбора магазина (смена магазина)"""
+        store = serializer.validated_data.get('store')
+
+        # Проверяем что магазин одобрен
+        if store.approval_status != 'approved':
+            raise ValidationError('Магазин не одобрен администратором')
+
         serializer.save(user=self.request.user)
 
 

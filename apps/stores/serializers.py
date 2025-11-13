@@ -53,6 +53,24 @@ class StoreSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['debt', 'created_by', 'created_at', 'updated_at']
 
+    def validate(self, data):
+        """
+        Валидация: город должен принадлежать выбранному региону
+        """
+        region = data.get('region')
+        city = data.get('city')
+
+        # Проверяем только если оба поля присутствуют
+        if region and city:
+            # Проверяем что город принадлежит выбранному региону
+            if city.region_id != region.id:
+                raise serializers.ValidationError({
+                    'city': f'Город {city.name} не принадлежит региону {region.name}. '
+                            f'Этот город находится в регионе {city.region.name}.'
+                })
+
+        return data
+
 
 class StoreSelectionSerializer(serializers.ModelSerializer):
     """Выбор магазина"""
