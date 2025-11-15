@@ -124,16 +124,23 @@ class Store(models.Model):
         ordering = ['-created_at']
         indexes = [models.Index(fields=['inn', 'phone'])]
 
+    def clean(self):
+        super().clean()
+        if self.city and self.region and self.city.region != self.region:
+            raise ValidationError({'city': 'Город должен принадлежать выбранному региону.'})
+
+
     def __str__(self):
         return self.name
 
 
 class StoreSelection(models.Model):
     """Выбор магазина пользователем (роль STORE)"""
-    user = models.OneToOneField(
+    user = models.ForeignKey(  # Изменил с OneToOne на ForeignKey
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         limit_choices_to={'role': 'store'},
+        related_name='store_selections',  # Для multiple
         verbose_name='Пользователь'
     )
     store = models.ForeignKey(
@@ -146,11 +153,12 @@ class StoreSelection(models.Model):
 
     class Meta:
         db_table = 'store_selections'
+        unique_together = []
         verbose_name = 'Выбор магазина'
         verbose_name_plural = 'Выборы магазинов'
 
     def __str__(self):
-        return f"{self.user.name} → {self.store.name}"
+        return f"{self.user.name} → {self.store.name} ({self.selected_at})"
 
 
 class StoreProductRequest(models.Model):
@@ -191,7 +199,8 @@ class StoreProductRequest(models.Model):
 class StoreRequest(models.Model):
     """
     История запросов магазина.
-    Создается из StoreProductRequest при финальном подтверждении.
+    Создается из StoreProductRequest (wishlist).
+    Без статусов — просто snapshot wishlist'а.
     """
     store = models.ForeignKey(
         Store,
@@ -213,10 +222,6 @@ class StoreRequest(models.Model):
         verbose_name='Общая сумма'
     )
     note = models.TextField(blank=True, verbose_name='Примечание')
-
-    # ИСПРАВЛЕНИЕ #6: Убрал статусы - это не заказ, а просто запрос
-    # Статус есть только у заказа партнёра → админу
-
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
 
     # ИСПРАВЛЕНИЕ #11: Защита от race condition
@@ -233,13 +238,10 @@ class StoreRequest(models.Model):
         verbose_name = 'Запрос магазина'
         verbose_name_plural = 'Запросы магазинов'
         ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['store', 'created_at']),
-            models.Index(fields=['idempotency_key']),
-        ]
+        # Убрали unique_together — multiple requests per store ок (история)
 
     def __str__(self):
-        return f"Запрос {self.id} от {self.store.name}"
+        return f"Запрос {self.id} для {self.store.name} ({self.total_amount} сом)"
 
 
 class StoreRequestItem(models.Model):

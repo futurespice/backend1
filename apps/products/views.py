@@ -8,12 +8,12 @@ from datetime import date
 from decimal import Decimal
 
 from .models import (
-    ProductCategory, Product, Expense, ProductionRecord, ProductionItem,
+    Product, Expense, ProductionRecord, ProductionItem,
     MechanicalExpenseEntry, BonusHistory, StoreProductCounter,
     ProductExpenseRelation, DefectiveProduct
 )
 from .serializers import (
-    ProductCategorySerializer, ProductListSerializer, ProductDetailSerializer,
+    ProductListSerializer, ProductDetailSerializer,
     ExpenseSerializer, ProductionRecordSerializer,
     ProductionItemSerializer, MechanicalExpenseEntrySerializer,
     BonusHistorySerializer, ProductExpenseRelationSerializer,
@@ -21,18 +21,6 @@ from .serializers import (
 )
 from .services import CostCalculator, BonusService
 from users.permissions import IsAdminUser, IsPartnerUser
-
-
-class ProductCategoryViewSet(viewsets.ModelViewSet):
-    """Категории товаров"""
-    queryset = ProductCategory.objects.filter(is_active=True).select_related('parent')
-    serializer_class = ProductCategorySerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAuthenticated(), IsAdminUser()]
-        return [IsAuthenticated()]
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -70,7 +58,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     Товары — ADMIN создаёт, все видят
     N+1 защита: prefetch_related('images', 'expense_relations')
     """
-    queryset = Product.objects.select_related('category').prefetch_related(
+    queryset = Product.objects.prefetch_related(
         'images', 'expense_relations__expense'
     ).order_by('-created_at')
 

@@ -2,18 +2,11 @@ import django_filters
 from django.db.models import Q
 from decimal import Decimal
 
-from .models import Product, ProductCategory
+from .models import Product
 
 
 class ProductFilter(django_filters.FilterSet):
     """Фильтры для товаров"""
-
-    # Основные фильтры
-    category = django_filters.ModelChoiceFilter(
-        queryset=ProductCategory.objects.filter(is_active=True)
-    )
-    category_type = django_filters.ChoiceFilter(choices=Product.CategoryType.choices)
-
     # Ценовые фильтры
     price_min = django_filters.NumberFilter(field_name='price', lookup_expr='gte')
     price_max = django_filters.NumberFilter(field_name='price', lookup_expr='lte')
@@ -37,7 +30,7 @@ class ProductFilter(django_filters.FilterSet):
     class Meta:
         model = Product
         fields = [
-            'category', 'category_type', 'is_active', 'is_available',
+            'is_active', 'is_available',
             'is_bonus_eligible'
         ]
 
@@ -71,26 +64,5 @@ class ProductFilter(django_filters.FilterSet):
 
         return queryset.filter(
             Q(name__icontains=value) |
-            Q(description__icontains=value) |
-            Q(category__name__icontains=value)
+            Q(description__icontains=value)
         )
-
-
-class ProductCategoryFilter(django_filters.FilterSet):
-    """Фильтры для категорий товаров"""
-
-    category_type = django_filters.ChoiceFilter(choices=ProductCategory.CategoryType.choices)
-    is_active = django_filters.BooleanFilter()
-    has_products = django_filters.BooleanFilter(method='filter_has_products')
-
-    class Meta:
-        model = ProductCategory
-        fields = ['category_type', 'is_active']
-
-    def filter_has_products(self, queryset, name, value):
-        """Фильтр категорий с товарами"""
-        if value is True:
-            return queryset.filter(products__isnull=False).distinct()
-        elif value is False:
-            return queryset.filter(products__isnull=True)
-        return queryset

@@ -41,6 +41,13 @@ class StoreSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     approval_status_display = serializers.CharField(source='get_approval_status_display', read_only=True)
 
+    def validate(self, data):
+        region = data.get('region')
+        city = data.get('city')
+        if region and city and city.region != region:
+            raise serializers.ValidationError({'city': 'Город должен принадлежать выбранному региону.'})
+        return data
+
     class Meta:
         model = Store
         fields = [
@@ -55,9 +62,8 @@ class StoreSerializer(serializers.ModelSerializer):
 
 
 class StoreSelectionSerializer(serializers.ModelSerializer):
-    """Выбор магазина"""
     store_name = serializers.CharField(source='store.name', read_only=True)
-
+    # Добавь для списка
     class Meta:
         model = StoreSelection
         fields = ['id', 'store', 'store_name', 'selected_at']

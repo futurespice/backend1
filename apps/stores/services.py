@@ -14,12 +14,13 @@ class StoreRequestService:
 
     @staticmethod
     @transaction.atomic
-    def create_from_product_requests(store, user, idempotency_key=None):
+    def create_from_product_requests(store, user, note=None, idempotency_key=None):
         """
         ИСПРАВЛЕНИЕ #5-6: Создание StoreRequest из StoreProductRequest
         ИСПРАВЛЕНИЕ #11: С защитой от race condition через idempotency_key
+        UPDATE: Без статусов — просто snapshot wishlist'а с note
         """
-        # Получаем все запросы магазина
+        # Получаем все запросы магазина (wishlist items)
         product_requests = StoreProductRequest.objects.select_for_update().filter(
             store=store
         ).select_related('product')
@@ -27,10 +28,18 @@ class StoreRequestService:
         if not product_requests.exists():
             raise ValidationError('Нет товаров для запроса')
 
-        # Создаём StoreRequest
+        # ИСПРАВЛЕНИЕ #11: Проверяем существующий по idempotency_key (если передан)
+        if idempotency_key:
+            existing = StoreRequest.objects.filter(idempotency_key=idempotency_key).first()
+            if existing:
+                # Если существует — возвращаем его (идепотентность)
+                return existing
+
+        # Создаём новый StoreRequest (всегда новый, multiple ок для истории)
         store_request = StoreRequest.objects.create(
             store=store,
             created_by=user,
+            note=note or '',
             idempotency_key=idempotency_key
         )
 
@@ -53,7 +62,7 @@ class StoreRequestService:
         store_request.total_amount = total_amount
         store_request.save()
 
-        # Удаляем временные запросы
+        # Удаляем временные запросы (wishlist очищается после snapshot)
         product_requests.delete()
 
         return store_request

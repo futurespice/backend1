@@ -50,6 +50,10 @@ class StoreAdmin(admin.ModelAdmin):
         }),
     )
 
+    def save_model(self, request, obj, form, change):
+        obj.full_clean()  # Вызовет clean()
+        super().save_model(request, obj, form, change)
+
 
 @admin.register(StoreSelection)
 class StoreSelectionAdmin(admin.ModelAdmin):

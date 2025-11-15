@@ -26,4 +26,4 @@ class IsPartnerOrAdmin(permissions.BasePermission):
         if request.user.is_superuser:
             return True
 
-        return hasattr(request.user, 'role') and request.user.role in ['partner', 'ADMIN']
+        return hasattr(request.user, 'role') and request.user.role in ['partner', 'admin']

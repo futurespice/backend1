@@ -4,7 +4,7 @@ from drf_spectacular.utils import extend_schema_field
 from drf_spectacular.types import OpenApiTypes
 
 from .models import (
-    ProductCategory, Product, ProductImage, Expense, ProductExpenseRelation,
+    Product, ProductImage, Expense, ProductExpenseRelation,
     ProductionRecord, ProductionItem, MechanicalExpenseEntry,
     BonusHistory, StoreProductCounter, DefectiveProduct
 )
@@ -12,12 +12,7 @@ from .models import (
 
 # ============= CATEGORY =============
 
-class ProductCategorySerializer(serializers.ModelSerializer):
-    parent_name = serializers.CharField(source='parent.name', read_only=True, allow_null=True)
 
-    class Meta:
-        model = ProductCategory
-        fields = ['id', 'name', 'description', 'parent', 'parent_name', 'is_active', 'created_at']
 
 
 # ============= EXPENSE SERIALIZERS =============
@@ -69,13 +64,12 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 class ProductListSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
-    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
     unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'category', 'category_name',
+            'id', 'name', 'description',
             'unit', 'unit_display', 'price', 'is_weight_based',
             'is_active', 'is_available', 'stock_quantity',
             'images', 'created_at'
@@ -85,7 +79,6 @@ class ProductListSerializer(serializers.ModelSerializer):
 class ProductDetailSerializer(serializers.ModelSerializer):
     images = ProductImageSerializer(many=True, read_only=True)
     expense_relations = ProductExpenseRelationSerializer(many=True, read_only=True)
-    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
     unit_display = serializers.CharField(source='get_unit_display', read_only=True)
 
     uploaded_images = serializers.ListField(
@@ -97,7 +90,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'category', 'category_name',
+            'id', 'name', 'description',
             'unit', 'unit_display', 'price', 'price_per_100g', 'cost_price',
             'is_weight_based', 'is_active', 'is_available',
             'stock_quantity', 'image', 'images', 'uploaded_images',

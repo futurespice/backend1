@@ -1,20 +1,11 @@
-# apps/products/admin.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 from django.contrib import admin
 from django.utils.html import format_html
 from decimal import Decimal
 from .models import (
-    ProductCategory, Product, ProductImage, Expense, ProductExpenseRelation,
+    Product, ProductImage, Expense, ProductExpenseRelation,
     ProductionRecord, ProductionItem, MechanicalExpenseEntry,
     BonusHistory, StoreProductCounter, DefectiveProduct
 )
-
-
-@admin.register(ProductCategory)
-class ProductCategoryAdmin(admin.ModelAdmin):
-    list_display = ['name', 'parent', 'is_active', 'created_at']
-    list_filter = ['is_active', 'parent']
-    search_fields = ['name', 'description']
-    readonly_fields = ['created_at']
 
 
 @admin.register(Expense)
@@ -74,17 +65,17 @@ class ProductExpenseRelationInline(admin.TabularInline):
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'category', 'price', 'cost_price', 'is_weight_based',
+        'name', 'price', 'cost_price', 'is_weight_based',
         'is_active', 'is_available', 'stock_quantity'
     ]
-    list_filter = ['category', 'is_weight_based', 'is_active', 'is_available']
+    list_filter = ['is_weight_based', 'is_active', 'is_available']
     search_fields = ['name', 'description']
     readonly_fields = ['price_per_100g', 'created_at', 'updated_at']
     inlines = [ProductImageInline, ProductExpenseRelationInline]
 
     fieldsets = (
         ('Основная информация', {
-            'fields': ('category', 'name', 'description', 'image')
+            'fields': ('name', 'description', 'image')
         }),
         ('Тип товара', {
             'fields': ('unit', 'is_weight_based')
@@ -103,10 +94,6 @@ class ProductAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
-
-    def get_queryset(self, request):
-        """N+1 защита"""
-        return super().get_queryset(request).select_related('category')
 
 
 @admin.register(ProductExpenseRelation)
