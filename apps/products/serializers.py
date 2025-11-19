@@ -207,3 +207,27 @@ class DefectiveProductSerializer(serializers.ModelSerializer):
             'reported_at', 'resolved_at'
         ]
         read_only_fields = ['partner', 'reported_at', 'resolved_at']
+
+
+class ProductionFinanceSummarySerializer(serializers.Serializer):
+    """
+    Агрегированный фин.результат по ProductionRecord.
+    """
+
+    record_id = serializers.IntegerField()
+    date = serializers.DateField()
+
+    total_quantity = serializers.DecimalField(max_digits=14, decimal_places=3)
+    ingredient_cost = serializers.DecimalField(max_digits=14, decimal_places=2)
+    overhead_cost = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_cost = serializers.DecimalField(max_digits=14, decimal_places=2)
+    revenue = serializers.DecimalField(max_digits=14, decimal_places=2)
+    net_profit = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+    fixed_daily_overhead = serializers.DecimalField(max_digits=14, decimal_places=2)
+    mechanical_daily_overhead = serializers.DecimalField(
+        max_digits=14, decimal_places=2
+    )
+
+    cost_per_unit = serializers.DecimalField(max_digits=14, decimal_places=4)
+    profit_per_unit = serializers.DecimalField(max_digits=14, decimal_places=4)

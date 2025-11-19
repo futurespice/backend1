@@ -1,34 +1,38 @@
-# apps/users/permissions.py
-from rest_framework.permissions import BasePermission, IsAuthenticated
-from typing import Any
+# apps/orders/permissions.py
 
-class IsAdminUser(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return request.user and request.user.is_authenticated and request.user.role == 'admin'
+from rest_framework import permissions
 
-class IsPartnerUser(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return request.user and request.user.is_authenticated and request.user.role == 'partner'
 
-class IsStoreUser(BasePermission):
-    def has_permission(self, request, view) -> bool:
-        return request.user and request.user.is_authenticated and request.user.role == 'store'
+class IsAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user
+            and user.is_authenticated
+            and (getattr(user, "role", None) == "admin" or user.is_superuser)
+        )
 
-class IsOwnerOrAdmin(BasePermission):
-    def has_object_permission(self, request, view, obj) -> bool:
-        if request.user.role == 'admin':
-            return True
-        # Check ownership based on model
-        if hasattr(obj, 'partner') and obj.partner == request.user:
-            return True
-        if hasattr(obj, 'store') and obj.store.created_by == request.user:
-            return True
-        return False
 
-class CanFulfillStoreOrder(BasePermission):
-    def has_object_permission(self, request, view, obj) -> bool:
-        return request.user == obj.partner and request.user.role == 'partner'
+class IsPartner(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and user.is_authenticated and getattr(user, "role", None) == "partner"
+        )
 
-class CanApproveReturn(BasePermission):
-    def has_object_permission(self, request, view, obj) -> bool:
-        return request.user == obj.order.partner and request.user.role == 'partner'
+
+class IsStoreUser(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(
+            user and user.is_authenticated and getattr(user, "role", None) == "store"
+        )
+
+
+class IsAdminOrPartner(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        role = getattr(user, "role", None)
+        return role in {"admin", "partner"} or user.is_superuser

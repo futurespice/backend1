@@ -1,74 +1,87 @@
-# from rest_framework import viewsets, status
-# from rest_framework.decorators import action
-# from rest_framework.response import Response
-# from rest_framework.permissions import IsAuthenticated
-# from django.utils import timezone
-#
-# from .models import Notification
-# from .serializers import NotificationSerializer
-#
-#
-# class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
-#     """
-#     API уведомлений
-#
-#     GET /api/notifications/ - список
-#     GET /api/notifications/unread_count/ - количество непрочитанных
-#     POST /api/notifications/{id}/mark_read/ - пометить прочитанным
-#     POST /api/notifications/mark_all_read/ - всё прочитать
-#     """
-#
-#     serializer_class = NotificationSerializer
-#     permission_classes = [IsAuthenticated]
-#
-#     def get_queryset(self):
-#         return Notification.objects.filter(
-#             recipient=self.request.user
-#         ).order_by('-created_at')
-#
-#     def list(self, request, *args, **kwargs):
-#         queryset = self.filter_queryset(self.get_queryset())
-#
-#         # Фильтр по is_read
-#         is_read = request.query_params.get('is_read')
-#         if is_read is not None:
-#             queryset = queryset.filter(is_read=is_read.lower() == 'true')
-#
-#         page = self.paginate_queryset(queryset)
-#         if page is not None:
-#             serializer = self.get_serializer(page, many=True)
-#             return self.get_paginated_response(serializer.data)
-#
-#         serializer = self.get_serializer(queryset, many=True)
-#         return Response(serializer.data)
-#
-#     @action(detail=False, methods=['get'])
-#     def unread_count(self, request):
-#         """Количество непрочитанных"""
-#         count = self.get_queryset().filter(is_read=False).count()
-#         return Response({'unread_count': count})
-#
-#     @action(detail=True, methods=['post'])
-#     def mark_read(self, request, pk=None):
-#         """Пометить прочитанным"""
-#         notification = self.get_object()
-#
-#         if not notification.is_read:
-#             notification.is_read = True
-#             notification.read_at = timezone.now()
-#             notification.save()
-#
-#         return Response(NotificationSerializer(notification).data)
-#
-#     @action(detail=False, methods=['post'])
-#     def mark_all_read(self, request):
-#         """Пометить все прочитанными"""
-#         updated = self.get_queryset().filter(is_read=False).update(
-#             is_read=True,
-#             read_at=timezone.now()
-#         )
-#
-#         return Response({
-#             'message': f'Помечено: {updated}',
-#             'updated_count': updated
-#         })
+# apps/notifications/views.py
+
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from .models import Notification
+from .serializers import (
+    NotificationCreateSerializer,
+    NotificationSerializer,
+)
+from .services import NotificationService
+
+
+class NotificationViewSet(viewsets.ModelViewSet):
+    """
+    CRUD для уведомлений.
+
+    Основной кейс:
+    - пользователю: list / mark_read / mark_all_read
+    - админ/сервисы используют NotificationService
+    """
+
+    queryset = Notification.objects.all().select_related("user")
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """
+        Пользователь видит только свои уведомления.
+        Admin с ролью 'admin' видит все.
+        """
+        qs = super().get_queryset()
+        user = self.request.user
+        if not user.is_authenticated:
+            return qs.none()
+
+        role = getattr(user, "role", None)
+        if role == "admin" or user.is_superuser:
+            return qs
+        return qs.filter(user=user)
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return NotificationCreateSerializer
+        return NotificationSerializer
+
+    def perform_create(self, serializer):
+        """
+        Создание уведомлений из API — опционально.
+
+        Можно ограничить только для админов, если нужно:
+        """
+        user = self.request.user
+        # если хочется жёстко: if getattr(user, "role", None) != "admin": raise PermissionDenied
+        serializer.save()
+
+    @action(detail=True, methods=["post"], url_path="mark_read")
+    def mark_read(self, request, pk=None):
+        """
+        POST /notifications/{id}/mark_read/
+
+        Отметить одно уведомление прочитанным.
+        """
+        notification = self.get_object()
+        if notification.user != request.user and not (
+            getattr(request.user, "role", None) == "admin"
+            or request.user.is_superuser
+        ):
+            return Response(
+                {"detail": "Недостаточно прав"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        NotificationService.mark_as_read(notification)
+        return Response(NotificationSerializer(notification).data)
+
+    @action(detail=False, methods=["post"], url_path="mark_all_read")
+    def mark_all_read(self, request):
+        """
+        POST /notifications/mark_all_read/
+
+        Отметить ВСЕ уведомления пользователя прочитанными.
+        """
+        count = NotificationService.mark_all_as_read(request.user)
+        return Response({"updated": count})

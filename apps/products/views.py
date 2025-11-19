@@ -7,6 +7,8 @@ from django.db import transaction
 from datetime import date
 from decimal import Decimal
 
+from rest_framework.views import APIView
+
 from .models import (
     Product, Expense, ProductionRecord, ProductionItem,
     MechanicalExpenseEntry, BonusHistory, StoreProductCounter,
@@ -17,10 +19,11 @@ from .serializers import (
     ExpenseSerializer, ProductionRecordSerializer,
     ProductionItemSerializer, MechanicalExpenseEntrySerializer,
     BonusHistorySerializer, ProductExpenseRelationSerializer,
-    DefectiveProductSerializer
+    DefectiveProductSerializer, ProductionFinanceSummarySerializer
 )
 from .services import CostCalculator, BonusService
 from users.permissions import IsAdminUser, IsPartnerUser
+from .finance import ProductionFinanceService
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -244,3 +247,31 @@ class DefectiveProductViewSet(viewsets.ModelViewSet):
         defect.resolved_at = date.today()
         defect.save()
         return Response({'status': 'rejected'})
+
+
+class ProductionFinanceView(APIView):
+    """
+    GET /api/products/production-finance/?record_id=XXX
+
+    Возвращает:
+    - себестоимость, выручку, чистую прибыль за день
+    - фиксированные/механические накладные
+    - себестоимость и прибыль с 1 единицы.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        record_id = request.query_params.get("record_id")
+        if not record_id:
+            return Response(
+                {"detail": "record_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        record = get_object_or_404(ProductionRecord, pk=record_id)
+
+        summary = ProductionFinanceService.calculate_for_record(record)
+        serializer = ProductionFinanceSummarySerializer(summary)
+
+        return Response(serializer.data)

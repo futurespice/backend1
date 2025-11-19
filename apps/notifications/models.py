@@ -1,56 +1,78 @@
-# from django.db import models
-# from django.conf import settings
-#
-# User = settings.AUTH_USER_MODEL
-#
-#
-# class Notification(models.Model):
-#     """Система уведомлений"""
-#
-#     NOTIFICATION_TYPES = [
-#         ('store_registered', 'Новый магазин'),
-#         ('store_approved', 'Магазин одобрен'),
-#         ('store_rejected', 'Магазин отклонён'),
-#         ('new_order', 'Новый заказ'),
-#         ('new_expense', 'Новый расход'),
-#         ('new_request', 'Новый запрос товаров'),
-#         ('message', 'Новое сообщение'),
-#         ('debt_reminder', 'Напоминание о долге'),
-#         ('system', 'Системное'),
-#     ]
-#
-#     recipient = models.ForeignKey(
-#         User,
-#         on_delete=models.CASCADE,
-#         related_name='notifications',
-#         verbose_name='Получатель'
-#     )
-#     type = models.CharField(
-#         'Тип',
-#         max_length=50,
-#         choices=NOTIFICATION_TYPES
-#     )
-#     title = models.CharField('Заголовок', max_length=255)
-#     message = models.TextField('Сообщение')
-#
-#     # Связь с объектом (полиморфная)
-#     related_object_type = models.CharField('Тип объекта', max_length=50, blank=True)
-#     related_object_id = models.PositiveIntegerField('ID объекта', null=True, blank=True)
-#
-#     is_read = models.BooleanField('Прочитано', default=False)
-#     read_at = models.DateTimeField('Прочитано в', null=True, blank=True)
-#
-#     created_at = models.DateTimeField(auto_now_add=True)
-#
-#     class Meta:
-#         db_table = 'notifications'
-#         verbose_name = 'Уведомление'
-#         verbose_name_plural = 'Уведомления'
-#         ordering = ['-created_at']
-#         indexes = [
-#             models.Index(fields=['recipient', '-created_at']),
-#             models.Index(fields=['recipient', 'is_read']),
-#         ]
-#
-#     def __str__(self):
-#         return f"{self.recipient.get_full_name()}: {self.title}"
+# apps/notifications/models.py
+
+from django.conf import settings
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+
+class NotificationType(models.TextChoices):
+    INFO = "info", _("Информация")
+    WARNING = "warning", _("Предупреждение")
+    SUCCESS = "success", _("Успех")
+    ERROR = "error", _("Ошибка")
+    SYSTEM = "system", _("Системное")
+    ORDER = "order", _("Заказ")
+    STORE = "store", _("Магазин")
+
+
+class NotificationChannel(models.TextChoices):
+    IN_APP = "in_app", _("Внутри системы")
+    EMAIL = "email", _("Email")
+    TELEGRAM = "telegram", _("Telegram")
+
+
+class Notification(models.Model):
+    """
+    Базовая модель уведомления.
+
+    Может использоваться:
+    - как in-app уведомление (список в личном кабинете),
+    - как лог отправленных email / телеграм уведомлений,
+    - как источник для пушей.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        verbose_name="Получатель",
+    )
+    title = models.CharField(max_length=255, verbose_name="Заголовок")
+    message = models.TextField(verbose_name="Текст")
+    type = models.CharField(
+        max_length=16,
+        choices=NotificationType.choices,
+        default=NotificationType.INFO,
+        verbose_name="Тип",
+    )
+    channel = models.CharField(
+        max_length=16,
+        choices=NotificationChannel.choices,
+        default=NotificationChannel.IN_APP,
+        verbose_name="Канал",
+    )
+    payload = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Доп. данные (payload)",
+        help_text="Любые доп. данные для фронта (id заказа, id магазина и т.д.)",
+    )
+
+    is_read = models.BooleanField(default=False, verbose_name="Прочитано")
+    read_at = models.DateTimeField(null=True, blank=True, verbose_name="Прочитано в")
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+
+    class Meta:
+        db_table = "notifications"
+        ordering = ["-created_at"]
+        verbose_name = "Уведомление"
+        verbose_name_plural = "Уведомления"
+        indexes = [
+            models.Index(fields=["user", "is_read"]),
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"[{self.get_type_display()}] {self.title} → {self.user_id}"

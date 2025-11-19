@@ -1,389 +1,493 @@
-# apps/orders/models.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
-from django.db import models
+# apps/orders/models.py
+
+from decimal import Decimal
+
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from decimal import Decimal
-from django.core.exceptions import ValidationError
+from django.db import models
+from django.utils.translation import gettext_lazy as _
 
-from products.models import Product
-from stores.models import Store, StoreRequest
+
+class PartnerOrderStatus(models.TextChoices):
+    DRAFT = "draft", _("Черновик")
+    PENDING = "pending", _("Ожидает подтверждения")
+    CONFIRMED = "confirmed", _("Подтверждён")
+    COMPLETED = "completed", _("Завершён")
+    CANCELLED = "cancelled", _("Отменён")
+
+
+class StoreOrderStatus(models.TextChoices):
+    DRAFT = "draft", _("Черновик")
+    PENDING = "pending", _("Ожидает подтверждения")
+    CONFIRMED = "confirmed", _("Подтверждён")
+    COMPLETED = "completed", _("Завершён")
+    CANCELLED = "cancelled", _("Отменён")
+
+
+class OrderReturnStatus(models.TextChoices):
+    PENDING = "pending", _("На рассмотрении")
+    APPROVED = "approved", _("Одобрен")
+    REJECTED = "rejected", _("Отклонён")
+    CANCELLED = "cancelled", _("Отменён")
 
 
 class PartnerOrder(models.Model):
     """
-    ИСПРАВЛЕНИЕ #5: Заказ партнёра → админу
-    Это заказ партнера на пополнение своего склада у админа
+    Заказ партнёра (пополнение склада партнёра).
     """
+
     partner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        limit_choices_to={'role': 'partner'},
-        related_name='partner_orders',
-        verbose_name='Партнёр'
+        on_delete=models.PROTECT,
+        related_name="partner_orders",
+        verbose_name="Партнёр",
     )
-
-    status = models.CharField(
-        max_length=20,
-        choices=[
-            ('pending', 'Ожидает подтверждения'),
-            ('confirmed', 'Подтверждён'),
-            ('processing', 'Обработка'),
-            ('shipped', 'Отправлен'),
-            ('delivered', 'Доставлен'),
-            ('cancelled', 'Отменён'),
-        ],
-        default='pending',
-        verbose_name='Статус'
-    )
-
-    total_amount = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Общая сумма'
-    )
-
-    note = models.TextField(blank=True, verbose_name='Примечание')
-
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
-
-    # ИСПРАВЛЕНИЕ #11: Защита от race condition
-    idempotency_key = models.CharField(
-        max_length=100,
-        unique=True,
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="created_partner_orders",
         null=True,
         blank=True,
-        verbose_name='Ключ идемпотентности'
+        verbose_name="Кем создан",
     )
+    status = models.CharField(
+        max_length=16,
+        choices=PartnerOrderStatus.choices,
+        default=PartnerOrderStatus.PENDING,
+        verbose_name="Статус",
+    )
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма заказа",
+    )
+    comment = models.TextField(blank=True, verbose_name="Комментарий")
+    idempotency_key = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="Idempotency key",
+        help_text="Для защиты от повторной отправки заказа с фронта",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     class Meta:
-        db_table = 'partner_orders'
-        verbose_name = 'Заказ партнёра'
-        verbose_name_plural = 'Заказы партнёров'
-        ordering = ['-created_at']
+        db_table = "partner_orders"
+        ordering = ["-created_at"]
+        verbose_name = "Заказ партнёра"
+        verbose_name_plural = "Заказы партнёров"
         indexes = [
-            models.Index(fields=['partner', 'created_at']),
-            models.Index(fields=['status']),
-            models.Index(fields=['idempotency_key']),
+            models.Index(fields=["partner", "created_at"]),
+            models.Index(fields=["status"]),
         ]
 
-    def __str__(self):
-        return f"Заказ партнёра {self.id} от {self.partner.name}"
+    def __str__(self) -> str:
+        return f"PartnerOrder #{self.pk} ({self.partner_id})"
+
+    def recalc_total(self, save: bool = True) -> Decimal:
+        total = (
+            self.items.aggregate(s=models.Sum("total")).get("s") or Decimal("0")
+        )
+        self.total_amount = total
+        if save:
+            self.save(update_fields=["total_amount"])
+        return total
 
 
 class PartnerOrderItem(models.Model):
-    """Позиция в заказе партнёра"""
+    """
+    Позиция в заказе партнёра.
+    """
+
     order = models.ForeignKey(
         PartnerOrder,
         on_delete=models.CASCADE,
-        related_name='items',
-        verbose_name='Заказ'
+        related_name="items",
+        verbose_name="Заказ",
     )
     product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        verbose_name='Товар'
+        "products.Product",
+        on_delete=models.PROTECT,
+        related_name="partner_order_items",
+        verbose_name="Товар",
     )
     quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0.1'))],
-        verbose_name='Количество'
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(0.001)],
+        verbose_name="Количество",
     )
     price = models.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Цена за единицу'
+        validators=[MinValueValidator(0)],
+        verbose_name="Цена",
+    )
+    total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма",
     )
 
     class Meta:
-        db_table = 'partner_order_items'
-        verbose_name = 'Позиция заказа партнёра'
-        verbose_name_plural = 'Позиции заказов партнёров'
+        db_table = "partner_order_items"
+        verbose_name = "Позиция заказа партнёра"
+        verbose_name_plural = "Позиции заказов партнёров"
 
-    def __str__(self):
-        return f"{self.product.name}: {self.quantity} ({self.order.id})"
+    def __str__(self) -> str:
+        return f"{self.product} x {self.quantity}"
 
-    @property
-    def total(self) -> Decimal:
-        """Общая стоимость позиции"""
-        return self.quantity * self.price
+    def save(self, *args, **kwargs):
+        self.total = (self.price or Decimal("0")) * (self.quantity or Decimal("0"))
+        super().save(*args, **kwargs)
 
 
 class StoreOrder(models.Model):
     """
-    ИСПРАВЛЕНИЕ #5-6: Заказ магазина → партнёру
-    Создается из StoreRequest после подтверждения партнёром
+    Заказ магазина у партнёра.
     """
+
     store = models.ForeignKey(
-        Store,
-        on_delete=models.CASCADE,
-        related_name='store_orders',
-        verbose_name='Магазин'
+        "stores.Store",
+        on_delete=models.PROTECT,
+        related_name="orders",
+        verbose_name="Магазин",
     )
     partner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
+        related_name="store_orders",
+        verbose_name="Партнёр",
         null=True,
-        limit_choices_to={'role': 'partner'},
-        related_name='store_orders_as_partner',
-        verbose_name='Партнёр'
     )
-
-    # Ссылка на запрос магазина
     store_request = models.ForeignKey(
-        StoreRequest,
+        "stores.StoreRequest",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='orders',
-        verbose_name='Запрос магазина'
+        related_name="store_orders",
+        verbose_name="Заявка магазина",
     )
-
-    # У заказа магазина НЕТ статусов - партнёр просто принимает или отклоняет
-    is_fulfilled = models.BooleanField(default=False, verbose_name='Выполнен')
-
-    total_amount = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Общая сумма'
-    )
-
-    bonus_applied = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Применён бонус'
-    )
-
-    note = models.TextField(blank=True, verbose_name='Примечание')
-
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
-
-    # ИСПРАВЛЕНИЕ #11: Защита от race condition
-    idempotency_key = models.CharField(
-        max_length=100,
-        unique=True,
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        verbose_name='Ключ идемпотентности'
+        related_name="created_store_orders",
+        verbose_name="Кем создан",
     )
+    status = models.CharField(
+        max_length=16,
+        choices=StoreOrderStatus.choices,
+        default=StoreOrderStatus.PENDING,
+        verbose_name="Статус",
+    )
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма заказа",
+    )
+    debt_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма в долг",
+    )
+    paid_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Оплачено",
+    )
+    idempotency_key = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="Idempotency key",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     class Meta:
-        db_table = 'store_orders'
-        verbose_name = 'Заказ магазина'
-        verbose_name_plural = 'Заказы магазинов'
-        ordering = ['-created_at']
+        db_table = "store_orders"
+        ordering = ["-created_at"]
+        verbose_name = "Заказ магазина"
+        verbose_name_plural = "Заказы магазинов"
         indexes = [
-            models.Index(fields=['store', 'created_at']),
-            models.Index(fields=['partner', 'created_at']),
-            models.Index(fields=['is_fulfilled']),
-            models.Index(fields=['idempotency_key']),
+            models.Index(fields=["store", "created_at"]),
+            models.Index(fields=["partner", "created_at"]),
+            models.Index(fields=["status"]),
         ]
 
-    def __str__(self):
-        return f"Заказ {self.id} для {self.store.name}"
+    def __str__(self) -> str:
+        return f"StoreOrder #{self.pk} ({self.store_id})"
+
+    @property
+    def outstanding_debt(self) -> Decimal:
+        return (self.debt_amount or Decimal("0")) - (self.paid_amount or Decimal("0"))
+
+    def recalc_total(self, save: bool = True) -> Decimal:
+        total = (
+            self.items.aggregate(s=models.Sum("total")).get("s") or Decimal("0")
+        )
+        self.total_amount = total
+        if save:
+            self.save(update_fields=["total_amount"])
+        return total
 
 
 class StoreOrderItem(models.Model):
-    """Позиция в заказе магазина"""
+    """
+    Позиция в заказе магазина.
+    """
+
     order = models.ForeignKey(
         StoreOrder,
         on_delete=models.CASCADE,
-        related_name='items',
-        verbose_name='Заказ'
+        related_name="items",
+        verbose_name="Заказ",
     )
     product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        verbose_name='Товар'
+        "products.Product",
+        on_delete=models.PROTECT,
+        related_name="store_order_items",
+        verbose_name="Товар",
     )
     quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0.1'))],
-        verbose_name='Количество'
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(0.001)],
+        verbose_name="Количество",
     )
     price = models.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Цена за единицу'
+        validators=[MinValueValidator(0)],
+        verbose_name="Цена",
     )
-
-    # ИСПРАВЛЕНИЕ #12: Признак бонусной позиции
-    is_bonus = models.BooleanField(default=False, verbose_name='Бонусная позиция')
+    total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма",
+    )
+    is_bonus = models.BooleanField(
+        default=False, verbose_name="Бонусная позиция"
+    )
 
     class Meta:
-        db_table = 'store_order_items'
-        verbose_name = 'Позиция заказа магазина'
-        verbose_name_plural = 'Позиции заказов магазинов'
+        db_table = "store_order_items"
+        verbose_name = "Позиция заказа магазина"
+        verbose_name_plural = "Позиции заказов магазинов"
 
-    def __str__(self):
-        return f"{self.product.name}: {self.quantity} ({self.order.id})"
+    def __str__(self) -> str:
+        return f"{self.product} x {self.quantity}"
 
-    @property
-    def total(self) -> Decimal:
-        """Общая стоимость позиции"""
-        if self.is_bonus:
-            return Decimal('0')  # Бонусные позиции не учитываются в сумме
-        return self.quantity * self.price
-
-
-class OrderHistory(models.Model):
-    """История операций по заказам"""
-    # Полиморфная связь с заказами
-    order_type = models.CharField(
-        max_length=20,
-        choices=[('partner', 'Заказ партнёра'), ('store', 'Заказ магазина')],
-        verbose_name='Тип заказа'
-    )
-    order_id = models.PositiveIntegerField(verbose_name='ID заказа')
-
-    type = models.CharField(
-        max_length=20,
-        choices=[
-            ('general', 'Общий'),
-            ('bonus', 'Бонус'),
-            ('defect', 'Брак'),
-            ('sold', 'Проданный'),
-            ('returned', 'Возвращенный')
-        ],
-        verbose_name='Тип'
-    )
-
-    product = models.ForeignKey(
-        Product,
-        on_delete=models.SET_NULL,
-        null=True,
-        verbose_name='Товар'
-    )
-
-    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name='Сумма')
-    quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=Decimal('0'),
-        verbose_name='Количество'
-    )
-    note = models.TextField(blank=True, verbose_name='Примечание')
-
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
-
-    class Meta:
-        db_table = 'order_history'
-        verbose_name = 'История заказа'
-        verbose_name_plural = 'История заказов'
-        ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['order_type', 'order_id']),
-            models.Index(fields=['created_at']),
-        ]
-
-    def __str__(self):
-        return f"{self.type} для заказа {self.order_id} ({self.created_at})"
+    def save(self, *args, **kwargs):
+        self.total = (self.price or Decimal("0")) * (self.quantity or Decimal("0"))
+        super().save(*args, **kwargs)
 
 
 class OrderReturn(models.Model):
     """
-    ИСПРАВЛЕНИЕ #8: Возврат товаров по заказу
-    (от магазина к партнёру)
+    Возврат товара по заказу магазина.
     """
+
+    store = models.ForeignKey(
+        "stores.Store",
+        on_delete=models.PROTECT,
+        related_name="order_returns",
+        verbose_name="Магазин",
+        null=True,
+    )
+    partner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="order_returns",
+        verbose_name="Партнёр",
+        null=True,
+    )
     order = models.ForeignKey(
-        StoreOrder,  # Только заказы магазинов можно возвращать
-        on_delete=models.CASCADE,
-        related_name='returns',
-        verbose_name='Заказ'
-    )
-
-    status = models.CharField(
-        max_length=20,
-        choices=[('pending', 'Ожидает'), ('approved', 'Подтверждён'), ('rejected', 'Отклонён')],
-        default='pending',
-        verbose_name='Статус'
-    )
-
-    total_amount = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Сумма возврата'
-    )
-
-    reason = models.TextField(verbose_name='Причина возврата')
-
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
-
-    # ИСПРАВЛЕНИЕ #11: Защита от race condition
-    idempotency_key = models.CharField(
-        max_length=100,
-        unique=True,
+        StoreOrder,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        verbose_name='Ключ идемпотентности'
+        related_name="returns",
+        verbose_name="Заказ магазина",
     )
+    status = models.CharField(
+        max_length=16,
+        choices=OrderReturnStatus.choices,
+        default=OrderReturnStatus.PENDING,
+        verbose_name="Статус",
+    )
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма возврата",
+    )
+    reason = models.TextField(blank=True, verbose_name="Причина")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_order_returns",
+        verbose_name="Кем создан",
+    )
+    idempotency_key = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="Idempotency key",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     class Meta:
-        db_table = 'order_returns'
-        verbose_name = 'Возврат товаров'
-        verbose_name_plural = 'Возвраты товаров'
-        ordering = ['-created_at']
+        db_table = "order_returns"
+        ordering = ["-created_at"]
+        verbose_name = "Возврат по заказу"
+        verbose_name_plural = "Возвраты по заказам"
         indexes = [
-            models.Index(fields=['order', 'status']),
-            models.Index(fields=['idempotency_key']),
+            models.Index(fields=["store", "created_at"]),
+            models.Index(fields=["partner", "created_at"]),
+            models.Index(fields=["status"]),
         ]
 
-    def __str__(self):
-        return f"Возврат по заказу {self.order.id}"
+    def __str__(self) -> str:
+        return f"OrderReturn #{self.pk}"
+
+    def recalc_total(self, save: bool = True) -> Decimal:
+        total = (
+            self.items.aggregate(s=models.Sum("total")).get("s") or Decimal("0")
+        )
+        self.total_amount = total
+        if save:
+            self.save(update_fields=["total_amount"])
+        return total
 
 
 class OrderReturnItem(models.Model):
-    """Позиция в возврате товаров"""
-    return_request = models.ForeignKey(
+    """
+    Позиция возврата по заказу магазина.
+    """
+
+    order_return = models.ForeignKey(
         OrderReturn,
         on_delete=models.CASCADE,
-        related_name='items',
-        verbose_name='Возврат'
+        related_name="items",
+        verbose_name="Возврат",
     )
     product = models.ForeignKey(
-        Product,
-        on_delete=models.CASCADE,
-        verbose_name='Товар'
+        "products.Product",
+        on_delete=models.PROTECT,
+        related_name="order_return_items",
+        verbose_name="Товар",
     )
     quantity = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0.1'))],
-        verbose_name='Количество'
+        max_digits=14,
+        decimal_places=3,
+        validators=[MinValueValidator(0.001)],
+        verbose_name="Количество",
     )
     price = models.DecimalField(
-        max_digits=10,
+        max_digits=14,
         decimal_places=2,
-        default=Decimal('0'),
-        validators=[MinValueValidator(Decimal('0'))],
-        verbose_name='Цена за единицу'
+        validators=[MinValueValidator(0)],
+        verbose_name="Цена",
+    )
+    total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        validators=[MinValueValidator(0)],
+        verbose_name="Сумма",
+    )
+    reason = models.CharField(
+        max_length=255, blank=True, verbose_name="Причина по позиции"
     )
 
     class Meta:
-        db_table = 'order_return_items'
-        verbose_name = 'Позиция возврата'
-        verbose_name_plural = 'Позиции возвратов'
+        db_table = "order_return_items"
+        verbose_name = "Позиция возврата по заказу"
+        verbose_name_plural = "Позиции возвратов по заказам"
 
-    def __str__(self):
-        return f"{self.product.name}: {self.quantity}"
+    def __str__(self) -> str:
+        return f"{self.product} x {self.quantity}"
 
-    @property
-    def total(self) -> Decimal:
-        """Общая стоимость возврата"""
-        return self.quantity * self.price
+    def save(self, *args, **kwargs):
+        self.total = (self.price or Decimal("0")) * (self.quantity or Decimal("0"))
+        super().save(*args, **kwargs)
+
+
+class OrderType(models.TextChoices):
+    PARTNER = "partner", "Заказ партнёра"
+    STORE = "store", "Заказ магазина"
+    RETURN = "return", "Возврат по заказу"
+
+
+class OrderHistory(models.Model):
+    """
+    История смены статусов заказов и возвратов.
+    """
+
+    order_type = models.CharField(
+        max_length=16,
+        choices=OrderType.choices,
+        verbose_name="Тип объекта",
+        null=True
+    )
+    order_id = models.PositiveIntegerField(verbose_name="ID объекта")
+    product = models.ForeignKey(
+        "products.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="order_history_entries",
+        verbose_name="Товар (опционально)",
+    )
+    old_status = models.CharField(
+        max_length=16, blank=True, verbose_name="Старый статус"
+    )
+    new_status = models.CharField(
+        max_length=16, verbose_name="Новый статус", null=True
+    )
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="order_history_entries",
+        verbose_name="Кем изменён",
+    )
+    comment = models.TextField(blank=True, verbose_name="Комментарий")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+
+    class Meta:
+        db_table = "order_history"
+        ordering = ["-created_at"]
+        verbose_name = "История заказа"
+        verbose_name_plural = "История заказов"
+        indexes = [
+            models.Index(fields=["order_type", "order_id"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.order_type}:{self.order_id} {self.old_status}->{self.new_status}"

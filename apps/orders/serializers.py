@@ -1,438 +1,304 @@
 # apps/orders/serializers.py
-from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
 
 from django.db import transaction
-from django.shortcuts import get_object_or_404
 from rest_framework import serializers
-from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 
-from .models import (
-    PartnerOrder, PartnerOrderItem,
-    StoreOrder, StoreOrderItem,
-    OrderHistory, OrderReturn, OrderReturnItem
-)
 from products.models import Product
-from stores.models import Store, StoreRequest
+from stores.models import Store
+from users.models import User
+from .models import (
+    OrderHistory,
+    OrderReturn,
+    OrderReturnItem,
+    PartnerOrder,
+    PartnerOrderItem,
+    StoreOrder,
+    StoreOrderItem,
+)
+from .services import OrderService
 
-
-# =============================================================================
-#  HELPER FUNCTIONS
-# =============================================================================
-
-def safe_decimal(value: Any) -> Decimal:
-    """Безопасное преобразование в Decimal, fallback → 0"""
-    try:
-        return Decimal(value) if value is not None else Decimal('0')
-    except (InvalidOperation, TypeError, ValueError):
-        return Decimal('0')
-
-
-# =============================================================================
-#  PARTNER ORDER (партнёр → админ)
-# =============================================================================
 
 class PartnerOrderItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    total = serializers.SerializerMethodField()
-
     class Meta:
         model = PartnerOrderItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'total']
-        read_only_fields = ['total']
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total(self, obj: PartnerOrderItem) -> Decimal:
-        """Безопасный расчёт итога позиции"""
-        if not obj.pk:
-            return Decimal('0')
-        return obj.total  # @property из модели
+        fields = ("id", "product", "quantity", "price", "total")
+        read_only_fields = ("id", "total")
 
 
 class PartnerOrderSerializer(serializers.ModelSerializer):
-    partner_name = serializers.SerializerMethodField()
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    items = PartnerOrderItemSerializer(many=True, read_only=True)
-    total_amount_display = serializers.SerializerMethodField()
+    items = PartnerOrderItemSerializer(many=True)
+    partner = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), required=False
+    )
 
     class Meta:
         model = PartnerOrder
-        fields = [
-            'id', 'partner', 'partner_name', 'status', 'status_display',
-            'total_amount', 'total_amount_display', 'note', 'items',
-            'idempotency_key', 'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'partner', 'total_amount', 'total_amount_display',
-            'idempotency_key', 'created_at', 'updated_at'
-        ]
+        fields = (
+            "id",
+            "partner",
+            "status",
+            "total_amount",
+            "comment",
+            "idempotency_key",
+            "created_at",
+            "updated_at",
+            "items",
+        )
+        read_only_fields = ("id", "total_amount", "created_at", "updated_at", "status")
 
-    @extend_schema_field(OpenApiTypes.STR)
-    def get_partner_name(self, obj: PartnerOrder) -> str:
-        return obj.partner.get_full_name() or obj.partner.email
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total_amount_display(self, obj: PartnerOrder) -> Decimal:
-        return obj.total_amount
-
-
-class CreatePartnerOrderSerializer(serializers.Serializer):
-    """Создание заказа партнёра с полной валидацией и пересчётом"""
-    note = serializers.CharField(max_length=500, allow_blank=True, required=False, default='')
-    items = serializers.ListField(
-        child=serializers.DictField(),
-        min_length=1,
-        error_messages={'min_length': 'Укажите хотя бы одну позицию'}
-    )
-    idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True)
-
-    def validate_items(self, items: List[Dict]) -> List[Dict]:
-        if not items:
-            raise serializers.ValidationError("Список позиций не может быть пустым")
-
-        validated = []
-        product_ids = set()
-
-        for idx, item in enumerate(items):
-            product_id = item.get('product')
-            quantity = item.get('quantity')
-            price = item.get('price')
-
-            if not product_id or not isinstance(product_id, int):
-                raise serializers.ValidationError(f"Позиция {idx + 1}: укажите корректный product ID")
-            if product_id in product_ids:
-                raise serializers.ValidationError(f"Позиция {idx + 1}: дублирование товара")
-            product_ids.add(product_id)
-
-            if not quantity or not isinstance(quantity, (int, float, Decimal, str)):
-                raise serializers.ValidationError(f"Позиция {idx + 1}: quantity обязателен")
-            try:
-                qty = Decimal(str(quantity))
-                if qty <= 0:
-                    raise serializers.ValidationError("quantity должен быть > 0")
-            except InvalidOperation:
-                raise serializers.ValidationError(f"Позиция {idx + 1}: некорректное значение quantity")
-
-            if price is not None:
-                try:
-                    prc = Decimal(str(price))
-                    if prc < 0:
-                        raise serializers.ValidationError("price не может быть отрицательным")
-                except InvalidOperation:
-                    raise serializers.ValidationError(f"Позиция {idx + 1}: некорректное значение price")
-            else:
-                prc = None
-
-            validated.append({
-                'product_id': product_id,
-                'quantity': qty,
-                'price': prc
-            })
-
-        return validated
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Нужно указать хотя бы одну позицию")
+        for item in value:
+            qty = item.get("quantity")
+            if qty is None or Decimal(qty) <= 0:
+                raise serializers.ValidationError("Количество должно быть больше 0")
+        return value
 
     @transaction.atomic
-    def create(self, validated_data: Dict) -> PartnerOrder:
-        items_data = validated_data.pop('items')
-        idempotency_key = validated_data.pop('idempotency_key', None)
+    def create(self, validated_data):
+        items_data = validated_data.pop("items")
+        request = self.context.get("request")
+        partner = validated_data.get("partner") or getattr(request.user, "partner", None) or request.user
+        created_by = request.user if request else None
+        idempotency_key = validated_data.get("idempotency_key")
 
-        # Идемпотентность
-        if idempotency_key:
-            existing = PartnerOrder.objects.filter(idempotency_key=idempotency_key).first()
-            if existing:
-                return existing
-
-        order = PartnerOrder.objects.create(
-            partner=self.context['request'].user,
-            **validated_data
-        )
-
-        if idempotency_key:
-            order.idempotency_key = idempotency_key
-            order.save(update_fields=['idempotency_key'])
-
-        total = Decimal('0')
-        order_items = []
-
+        products_map = {
+            item["product"].id: item["product"] for item in items_data
+        }
+        items_payload = []
         for item in items_data:
-            product = get_object_or_404(Product, id=item['product_id'])
-            price = item['price'] if item['price'] is not None else product.price
-
-            order_item = PartnerOrderItem(
-                order=order,
-                product=product,
-                quantity=item['quantity'],
-                price=price
+            product: Product = item["product"]
+            qty = item["quantity"]
+            price = item.get("price") or product.price
+            items_payload.append(
+                {"product": product, "quantity": qty, "price": price}
             )
-            order_item.save()
-            order_items.append(order_item)
-            total += order_item.total
 
-        order.total_amount = total
-        order.save(update_fields=['total_amount'])
-
+        order = OrderService.create_partner_order(
+            partner=partner,
+            items=items_payload,
+            created_by=created_by,
+            comment=validated_data.get("comment", ""),
+            idempotency_key=idempotency_key,
+        )
         return order
 
 
-# =============================================================================
-#  STORE ORDER (магазин → партнёр)
-# =============================================================================
-
 class StoreOrderItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    total = serializers.SerializerMethodField()
-
     class Meta:
         model = StoreOrderItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'is_bonus', 'total']
-        read_only_fields = ['total']
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total(self, obj: StoreOrderItem) -> Decimal:
-        return Decimal('0') if obj.is_bonus else obj.total
+        fields = (
+            "id",
+            "product",
+            "quantity",
+            "price",
+            "total",
+            "is_bonus",
+        )
+        read_only_fields = ("id", "total")
 
 
 class StoreOrderSerializer(serializers.ModelSerializer):
-    store_name = serializers.CharField(source='store.name', read_only=True)
-    partner_name = serializers.SerializerMethodField()
-    items = StoreOrderItemSerializer(many=True, read_only=True)
-    total_amount_display = serializers.SerializerMethodField()
-    bonus_applied_display = serializers.SerializerMethodField()
+    items = StoreOrderItemSerializer(many=True)
+    store = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), required=False
+    )
+    partner = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), required=False
+    )
 
     class Meta:
         model = StoreOrder
-        fields = [
-            'id', 'store', 'store_name', 'partner', 'partner_name',
-            'store_request', 'is_fulfilled', 'total_amount', 'total_amount_display',
-            'bonus_applied', 'bonus_applied_display', 'note', 'items',
-            'idempotency_key', 'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'store', 'partner', 'store_request', 'total_amount', 'total_amount_display',
-            'bonus_applied', 'bonus_applied_display', 'idempotency_key', 'created_at', 'updated_at'
-        ]
-
-    def get_partner_name(self, obj: StoreOrder) -> str:
-        return obj.partner.get_full_name() or obj.partner.email if obj.partner else "—"
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total_amount_display(self, obj: StoreOrder) -> Decimal:
-        return obj.total_amount
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_bonus_applied_display(self, obj: StoreOrder) -> Decimal:
-        return obj.bonus_applied
-
-
-class CreateStoreOrderSerializer(serializers.Serializer):
-    """Создание заказа магазина из подтверждённого StoreRequest"""
-    store_request_id = serializers.IntegerField()
-    note = serializers.CharField(max_length=500, allow_blank=True, required=False, default='')
-    idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True)
-
-    def validate_store_request_id(self, value: int) -> StoreRequest:
-        try:
-            request = StoreRequest.objects.select_related('store').get(id=value, status='confirmed')
-        except StoreRequest.DoesNotExist:
-            raise serializers.ValidationError("Запрос не найден или не подтверждён")
-        return request
-
-    @transaction.atomic
-    def create(self, validated_data: Dict) -> StoreOrder:
-        store_request = validated_data.pop('store_request_id')
-        idempotency_key = validated_data.pop('idempotency_key', None)
-
-        if idempotency_key:
-            existing = StoreOrder.objects.filter(idempotency_key=idempotency_key).first()
-            if existing:
-                return existing
-
-        order = StoreOrder.objects.create(
-            store=store_request.store,
-            partner=self.context['request'].user,
-            store_request=store_request,
-            **validated_data
+        fields = (
+            "id",
+            "store",
+            "partner",
+            "store_request",
+            "status",
+            "total_amount",
+            "debt_amount",
+            "paid_amount",
+            "idempotency_key",
+            "created_at",
+            "updated_at",
+            "items",
+        )
+        read_only_fields = (
+            "id",
+            "total_amount",
+            "created_at",
+            "updated_at",
+            "status",
         )
 
-        if idempotency_key:
-            order.idempotency_key = idempotency_key
-            order.save(update_fields=['idempotency_key'])
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Нужно указать хотя бы одну позицию")
+        for item in value:
+            qty = item.get("quantity")
+            if qty is None or Decimal(qty) <= 0:
+                raise serializers.ValidationError("Количество должно быть больше 0")
+        return value
 
-        # Копируем позиции из запроса
-        total = Decimal('0')
-        bonus = Decimal('0')
-        for item in store_request.items.select_related('product').all():
-            price = item.price or item.product.price
-            order_item = StoreOrderItem(
-                order=order,
-                product=item.product,
-                quantity=item.quantity,
-                price=price,
-                is_bonus=item.is_bonus
+    @transaction.atomic
+    def create(self, validated_data):
+        items_data = validated_data.pop("items")
+        request = self.context.get("request")
+        store = validated_data.get("store")
+        partner = validated_data.get("partner")
+        if request:
+            user = request.user
+            if getattr(user, "role", None) == "store" and store is None:
+                # магазин берём из StoreSelection, если нужно — можно доработать
+                from stores.models import StoreSelection
+
+                selection = (
+                    StoreSelection.objects.filter(user=user)
+                    .select_related("store")
+                    .first()
+                )
+                if not selection:
+                    raise serializers.ValidationError(
+                        "У пользователя не выбран активный магазин"
+                    )
+                store = selection.store
+            if getattr(user, "role", None) == "partner" and partner is None:
+                partner = user
+
+        created_by = request.user if request else None
+        idempotency_key = validated_data.get("idempotency_key")
+
+        items_payload = []
+        for item in items_data:
+            product: Product = item["product"]
+            qty = item["quantity"]
+            price = item.get("price") or product.price
+            is_bonus = item.get("is_bonus", False)
+            items_payload.append(
+                {
+                    "product": product,
+                    "quantity": qty,
+                    "price": price,
+                    "is_bonus": is_bonus,
+                }
             )
-            order_item.save()
-            if item.is_bonus:
-                bonus += price * item.quantity
-            else:
-                total += price * item.quantity
 
-        order.total_amount = total
-        order.bonus_applied = bonus
-        order.save(update_fields=['total_amount', 'bonus_applied'])
-
+        order = OrderService.create_store_order(
+            store=store,
+            partner=partner,
+            items=items_payload,
+            created_by=created_by,
+            store_request=validated_data.get("store_request"),
+            idempotency_key=idempotency_key,
+            debt_amount=validated_data.get("debt_amount", Decimal("0")),
+            paid_amount=validated_data.get("paid_amount", Decimal("0")),
+        )
         return order
 
 
-# =============================================================================
-#  ORDER HISTORY
-# =============================================================================
-
-class OrderHistorySerializer(serializers.ModelSerializer):
-    type_display = serializers.CharField(source='get_type_display', read_only=True)
-    product_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = OrderHistory
-        fields = [
-            'id', 'order_type', 'order_id', 'type', 'type_display',
-            'product', 'product_name', 'amount', 'quantity', 'note', 'created_at'
-        ]
-        read_only_fields = fields
-
-    @extend_schema_field(OpenApiTypes.STR)
-    def get_product_name(self, obj: OrderHistory) -> Optional[str]:
-        return obj.product.name if obj.product else None
-
-
-# =============================================================================
-#  ORDER RETURNS
-# =============================================================================
-
 class OrderReturnItemSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(source='product.name', read_only=True)
-    total = serializers.SerializerMethodField()
-
     class Meta:
         model = OrderReturnItem
-        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'total']
-        read_only_fields = ['total']
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total(self, obj: OrderReturnItem) -> Decimal:
-        return obj.total if obj.pk else Decimal('0')
+        fields = (
+            "id",
+            "product",
+            "quantity",
+            "price",
+            "total",
+            "reason",
+        )
+        read_only_fields = ("id", "total")
 
 
 class OrderReturnSerializer(serializers.ModelSerializer):
-    order_id = serializers.IntegerField(source='order.id', read_only=True)
-    store_name = serializers.CharField(source='order.store.name', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
-    items = OrderReturnItemSerializer(many=True, read_only=True)
-    total_amount_display = serializers.SerializerMethodField()
+    items = OrderReturnItemSerializer(many=True)
+    store = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(), required=False
+    )
+    partner = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(), required=False
+    )
 
     class Meta:
         model = OrderReturn
-        fields = [
-            'id', 'order', 'order_id', 'store_name', 'status', 'status_display',
-            'total_amount', 'total_amount_display', 'reason', 'items',
-            'idempotency_key', 'created_at', 'updated_at'
-        ]
-        read_only_fields = [
-            'total_amount', 'total_amount_display', 'idempotency_key', 'created_at', 'updated_at'
-        ]
-
-    @extend_schema_field(OpenApiTypes.DECIMAL)
-    def get_total_amount_display(self, obj: OrderReturn) -> Decimal:
-        return obj.total_amount
-
-
-class CreateOrderReturnSerializer(serializers.Serializer):
-    """Создание возврата с полной валидацией"""
-    order_id = serializers.IntegerField()
-    reason = serializers.CharField(max_length=500)
-    items = serializers.ListField(
-        child=serializers.DictField(),
-        min_length=1
-    )
-    idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True)
-
-    def validate_order_id(self, value: int) -> StoreOrder:
-        try:
-            order = StoreOrder.objects.select_related('store').get(id=value, is_fulfilled=True)
-        except StoreOrder.DoesNotExist:
-            raise serializers.ValidationError("Заказ не найден или не выполнен")
-        return order
-
-    def validate_items(self, items: List[Dict]) -> List[Dict]:
-        if not items:
-            raise serializers.ValidationError("Укажите хотя бы одну позицию")
-
-        validated = []
-        product_ids = set()
-
-        for idx, item in enumerate(items):
-            product_id = item.get('product')
-            quantity = item.get('quantity')
-
-            if not product_id or not isinstance(product_id, int):
-                raise serializers.ValidationError(f"Позиция {idx + 1}: укажите product ID")
-            if product_id in product_ids:
-                raise serializers.ValidationError(f"Позиция {idx + 1}: дублирование")
-            product_ids.add(product_id)
-
-            try:
-                qty = Decimal(str(quantity))
-                if qty <= 0:
-                    raise serializers.ValidationError("quantity > 0")
-            except (InvalidOperation, TypeError):
-                raise serializers.ValidationError(f"Позиция {idx + 1}: некорректное quantity")
-
-            validated.append({'product_id': product_id, 'quantity': qty})
-
-        return validated
+        fields = (
+            "id",
+            "store",
+            "partner",
+            "order",
+            "status",
+            "total_amount",
+            "reason",
+            "idempotency_key",
+            "created_at",
+            "updated_at",
+            "items",
+        )
+        read_only_fields = ("id", "total_amount", "created_at", "updated_at", "status")
 
     @transaction.atomic
-    def create(self, validated_data: Dict) -> OrderReturn:
-        order = validated_data.pop('order_id')
-        items_data = validated_data.pop('items')
-        idempotency_key = validated_data.pop('idempotency_key', None)
+    def create(self, validated_data):
+        items_data = validated_data.pop("items")
+        request = self.context.get("request")
+        store = validated_data.get("store")
+        partner = validated_data.get("partner")
+        if request:
+            user = request.user
+            if getattr(user, "role", None) == "store" and store is None:
+                from stores.models import StoreSelection
 
-        if idempotency_key:
-            existing = OrderReturn.objects.filter(idempotency_key=idempotency_key).first()
-            if existing:
-                return existing
+                selection = (
+                    StoreSelection.objects.filter(user=user)
+                    .select_related("store")
+                    .first()
+                )
+                if not selection:
+                    raise serializers.ValidationError(
+                        "У пользователя не выбран активный магазин"
+                    )
+                store = selection.store
+            if getattr(user, "role", None) == "partner" and partner is None:
+                partner = user
 
-        return_request = OrderReturn.objects.create(
-            order=order,
-            **validated_data
-        )
+        created_by = request.user if request else None
+        idempotency_key = validated_data.get("idempotency_key")
 
-        if idempotency_key:
-            return_request.idempotency_key = idempotency_key
-            return_request.save(update_fields=['idempotency_key'])
-
-        total = Decimal('0')
+        items_payload = []
         for item in items_data:
-            product = get_object_or_404(Product, id=item['product_id'])
-            order_item = order.items.filter(product=product).first()
-            if not order_item:
-                raise serializers.ValidationError(f"Товар {product.name} не найден в заказе")
-
-            max_qty = order_item.quantity
-            if item['quantity'] > max_qty:
-                raise serializers.ValidationError(f"Возврат {product.name}: превышено ({item['quantity']} > {max_qty})")
-
-            return_item = OrderReturnItem(
-                return_request=return_request,
-                product=product,
-                quantity=item['quantity'],
-                price=order_item.price
+            product: Product = item["product"]
+            qty = item["quantity"]
+            price = item.get("price") or product.price
+            items_payload.append(
+                {"product": product, "quantity": qty, "price": price, "reason": item.get("reason", "")}
             )
-            return_item.save()
-            total += return_item.total
 
-        return_request.total_amount = total
-        return_request.save(update_fields=['total_amount'])
+        order_return = OrderService.create_order_return(
+            store=store,
+            partner=partner,
+            order=validated_data.get("order"),
+            items=items_payload,
+            created_by=created_by,
+            reason=validated_data.get("reason", ""),
+            idempotency_key=idempotency_key,
+        )
+        return order_return
 
-        return return_request
+
+class OrderHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderHistory
+        fields = (
+            "id",
+            "order_type",
+            "order_id",
+            "product",
+            "old_status",
+            "new_status",
+            "changed_by",
+            "comment",
+            "created_at",
+        )
+        read_only_fields = fields
