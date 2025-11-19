@@ -4,6 +4,10 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
 from django.conf import settings
+from django.db.models.functions import Coalesce
+from django.db.models import Sum
+from django.utils import timezone
+
 
 
 class Expense(models.Model):
@@ -122,14 +126,51 @@ class Product(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создано')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Обновлено')
 
+    popularity_weight = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        default=Decimal('1.000000'),
+        validators=[MinValueValidator(Decimal('0.0001'))],
+        verbose_name='Коэффициент популярности',
+        help_text='Чем выше — тем больше накладных расходов несёт товар (по продажам за 90 дней)'
+    )
+
     class Meta:
         db_table = 'products'
         verbose_name = 'Товар'
         verbose_name_plural = 'Товары'
         ordering = ['name']
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
+
+    def update_popularity_weight(self) -> None:
+        """
+        Автоматическое обновление коэффициента популярности.
+        Вызывать ежедневно (Celery beat / management command).
+        """
+        from orders.models import StoreOrderItem  # Импорт здесь, чтобы избежать циклического импорта
+
+        ninety_days_ago = timezone.now() - timezone.timedelta(days=90)
+
+        sales_qty: Decimal = (
+            StoreOrderItem.objects
+            .filter(
+                product=self,
+                order__status='completed',
+                order__created_at__gte=ninety_days_ago,
+                is_bonus=False
+            )
+            .aggregate(total=Coalesce(Sum('quantity'), Decimal('0')))['total']
+        )
+
+        # Формула: 1.0 + (продано за 90 дней / 1000)
+        # Можно менять под бизнес-логику
+        weight = Decimal('1.0') + (sales_qty / Decimal('1000'))
+        weight = min(weight, Decimal('10.0'))  # Ограничение сверху
+
+        self.popularity_weight = weight.quantize(Decimal('0.000001'))
+        self.save(update_fields=['popularity_weight'])
 
 
 class ProductImage(models.Model):

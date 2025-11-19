@@ -4,8 +4,26 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.utils.translation import gettext_lazy as _
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
+
+
+class DebtPayment(models.Model):
+    order = models.ForeignKey('StoreOrder', on_delete=models.CASCADE, related_name='debt_payments')
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    paid_by = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, related_name='debt_payments_made')
+    received_by = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, related_name='debt_payments_received')
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Погашение долга'
+
+    def __str__(self) -> str:
+        return f"Оплата {self.amount} по заказу #{self.order.id}"
 
 
 class PartnerOrderStatus(models.TextChoices):
@@ -245,6 +263,45 @@ class StoreOrder(models.Model):
         if save:
             self.save(update_fields=["total_amount"])
         return total
+
+    @property
+    def outstanding_debt(self) -> Decimal:
+        return (self.debt_amount or Decimal('0')) - (self.paid_amount or Decimal('0'))
+
+    @transaction.atomic
+    def pay_debt(self, amount: Decimal, paid_by=None, received_by=None, comment: str = '') -> DebtPayment:
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise ValidationError('Сумма должна быть больше 0')
+        if amount > self.outstanding_debt:
+            raise ValidationError(f'Сумма превышает остаток долга: {self.outstanding_debt}')
+
+        self.paid_amount = (self.paid_amount or Decimal('0')) + amount
+        self.save(update_fields=['paid_amount'])
+
+        # Обновляем общий долг магазина
+        self.store.debt = models.F('debt') - amount
+        self.store.save(update_fields=['debt'])
+
+        payment = DebtPayment.objects.create(
+            order=self,
+            amount=amount,
+            paid_by=paid_by,
+            received_by=received_by,
+            comment=comment
+        )
+
+        # История
+        OrderHistory.objects.create(
+            order_type=OrderType.STORE,
+            order_id=self.id,
+            old_status=self.status,
+            new_status=self.status,
+            changed_by=paid_by,
+            comment=f'Погашение долга на {amount} сом'
+        )
+
+        return payment
 
 
 class StoreOrderItem(models.Model):
@@ -491,3 +548,4 @@ class OrderHistory(models.Model):
 
     def __str__(self) -> str:
         return f"{self.order_type}:{self.order_id} {self.old_status}->{self.new_status}"
+

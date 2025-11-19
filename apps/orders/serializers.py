@@ -1,7 +1,7 @@
 # apps/orders/serializers.py
 
 from decimal import Decimal
-
+from typing import Any
 from django.db import transaction
 from rest_framework import serializers
 
@@ -15,10 +15,48 @@ from .models import (
     PartnerOrder,
     PartnerOrderItem,
     StoreOrder,
-    StoreOrderItem,
+    StoreOrderItem, DebtPayment,
 )
 from .services import OrderService
 
+class DebtPaymentSerializer(serializers.ModelSerializer):
+    """Сериализатор истории погашения долга"""
+    paid_by_name = serializers.CharField(
+        source='paid_by.get_full_name', read_only=True, allow_null=True
+    )
+    paid_by_phone = serializers.CharField(source='paid_by.phone', read_only=True, allow_null=True)
+    received_by_name = serializers.CharField(
+        source='received_by.get_full_name', read_only=True, allow_null=True
+    )
+    received_by_phone = serializers.CharField(source='received_by.phone', read_only=True, allow_null=True)
+
+    # Правильный вариант — просто читаемое поле, без queryset
+    order_id = serializers.IntegerField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.id', read_only=True)  # если нужен номер заказа
+
+    class Meta:
+        model = DebtPayment
+        fields = [
+            'id',
+            'order_id', 'order_number',
+            'amount',
+            'paid_by', 'paid_by_name', 'paid_by_phone',
+            'received_by', 'received_by_name', 'received_by_phone',
+            'comment',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id', 'order_id', 'order_number',
+            'paid_by', 'received_by',
+            'created_at',
+        ]
+
+    def to_representation(self, instance: DebtPayment):
+        ret = super().to_representation(instance)
+        # Красиво форматируем сумму и дату
+        ret['amount'] = f"{instance.amount:,.2f} сом"
+        ret['created_at'] = instance.created_at.strftime('%d.%m.%Y %H:%M')
+        return ret
 
 class PartnerOrderItemSerializer(serializers.ModelSerializer):
     class Meta:
@@ -109,6 +147,8 @@ class StoreOrderSerializer(serializers.ModelSerializer):
     partner = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(), required=False
     )
+    debt_payments = DebtPaymentSerializer(many=True, read_only=True)
+    outstanding_debt = serializers.SerializerMethodField()
 
     class Meta:
         model = StoreOrder
@@ -125,6 +165,8 @@ class StoreOrderSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "items",
+            'debt_amount', 'paid_amount', 'outstanding_debt',
+            'debt_payments'
         )
         read_only_fields = (
             "id",
@@ -133,6 +175,9 @@ class StoreOrderSerializer(serializers.ModelSerializer):
             "updated_at",
             "status",
         )
+
+    def get_outstanding_debt(self, obj: StoreOrder) -> str:
+        return f"{obj.outstanding_debt:,.2f} сом"
 
     def validate_items(self, value):
         if not value:
@@ -302,3 +347,6 @@ class OrderHistorySerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = fields
+
+
+

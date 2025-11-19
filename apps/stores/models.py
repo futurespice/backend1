@@ -125,13 +125,12 @@ class Store(models.Model):
         indexes = [models.Index(fields=['inn', 'phone'])]
 
     def clean(self):
-        super().clean()
         if self.city and self.region and self.city.region != self.region:
-            raise ValidationError({'city': 'Город должен принадлежать выбранному региону.'})
+            raise ValidationError({'city': 'Город должен принадлежать выбранному региону'})
 
-
-    def __str__(self):
-        return self.name
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class StoreSelection(models.Model):

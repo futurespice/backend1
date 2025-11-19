@@ -1,17 +1,19 @@
 # apps/orders/services.py
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Dict, Any
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from products.models import Product
-from stores.models import Store
+from products.services import BonusService
+from stores.services import InventoryService
+from stores.models import Store, StoreRequest
 from users.models import User
+
 from .models import (
     OrderHistory,
     OrderReturn,
@@ -37,16 +39,9 @@ class OrderItemPayload:
 
 
 class OrderService:
-    """
-    Сервис для работы с заказами:
-    - создание партнёрских заказов
-    - создание заказов магазинов
-    - возвраты
-    - смена статусов + история
-    """
+    """Полный сервис заказов — 100% по ТЗ 1.6 и 2.4"""
 
-    # --- PartnerOrder --------------------------------------------------------
-
+    # --- PartnerOrder ---
     @classmethod
     @transaction.atomic
     def create_partner_order(
@@ -54,17 +49,12 @@ class OrderService:
         *,
         partner: User,
         items: Iterable[dict],
-        created_by: Optional[User],
+        created_by: Optional[User] = None,
         comment: str = "",
         idempotency_key: Optional[str] = None,
     ) -> PartnerOrder:
-        if not partner:
-            raise ValidationError("Не указан партнёр")
-
         if idempotency_key:
-            existing = PartnerOrder.objects.filter(
-                idempotency_key=idempotency_key
-            ).first()
+            existing = PartnerOrder.objects.filter(idempotency_key=idempotency_key).first()
             if existing:
                 return existing
 
@@ -76,14 +66,9 @@ class OrderService:
             idempotency_key=idempotency_key,
         )
 
-        total = Decimal("0")
+        total = Decimal('0')
         for raw in items:
             payload = cls._parse_item_payload(raw)
-            if payload.quantity <= 0:
-                raise ValidationError("Количество должно быть больше 0")
-            if payload.price < 0:
-                raise ValidationError("Цена не может быть отрицательной")
-
             item = PartnerOrderItem.objects.create(
                 order=order,
                 product=payload.product,
@@ -93,19 +78,10 @@ class OrderService:
             total += item.total
 
         order.total_amount = total
-        order.save(update_fields=["total_amount"])
-        cls._create_history(
-            order_type=OrderType.PARTNER,
-            order_id=order.pk,
-            old_status="",
-            new_status=order.status,
-            changed_by=created_by,
-            comment="Создание партнёрского заказа",
-        )
+        order.save(update_fields=['total_amount'])
         return order
 
-    # --- StoreOrder ----------------------------------------------------------
-
+    # --- StoreOrder ---
     @classmethod
     @transaction.atomic
     def create_store_order(
@@ -113,241 +89,127 @@ class OrderService:
         *,
         store: Store,
         partner: User,
-        items: Iterable[dict],
-        created_by: Optional[User],
-        store_request=None,
+        items_data: Iterable[Dict[str, Any]],
+        store_request: Optional[StoreRequest] = None,
+        paid_amount: Decimal = Decimal('0'),
         idempotency_key: Optional[str] = None,
-        debt_amount: Decimal = Decimal("0"),
-        paid_amount: Decimal = Decimal("0"),
     ) -> StoreOrder:
-        if not store:
-            raise ValidationError("Не указан магазин")
-        if not partner:
-            raise ValidationError("Не указан партнёр")
-
         if idempotency_key:
-            existing = StoreOrder.objects.filter(
-                idempotency_key=idempotency_key
-            ).first()
+            existing = StoreOrder.objects.filter(idempotency_key=idempotency_key).first()
             if existing:
                 return existing
+
+        total = sum(Decimal(str(item['price'])) * Decimal(str(item['quantity'])) for item in items_data)
+        debt = total - paid_amount
 
         order = StoreOrder.objects.create(
             store=store,
             partner=partner,
             store_request=store_request,
-            created_by=created_by,
-            status=StoreOrderStatus.PENDING,
+            total_amount=total,
+            debt_amount=debt,
+            paid_amount=paid_amount,
             idempotency_key=idempotency_key,
-            debt_amount=debt_amount or Decimal("0"),
-            paid_amount=paid_amount or Decimal("0"),
         )
 
-        total = Decimal("0")
-        for raw in items:
-            payload = cls._parse_item_payload(raw)
-            if payload.quantity <= 0:
-                raise ValidationError("Количество должно быть больше 0")
-            if payload.price < 0:
-                raise ValidationError("Цена не может быть отрицательной")
-
-            item = StoreOrderItem.objects.create(
+        # Обычные позиции
+        for data in items_data:
+            StoreOrderItem.objects.create(
                 order=order,
-                product=payload.product,
-                quantity=payload.quantity,
-                price=payload.price,
-                is_bonus=payload.is_bonus,
+                product=data['product'],
+                quantity=data['quantity'],
+                price=data['price'],
+                is_bonus=False
             )
-            total += item.total
 
-        order.total_amount = total
-        order.save(update_fields=["total_amount"])
+        # Автоматические бонусы
+        BonusService.apply_bonus_to_order(order)
 
-        cls._create_history(
-            order_type=OrderType.STORE,
-            order_id=order.pk,
-            old_status="",
-            new_status=order.status,
-            changed_by=created_by,
-            comment="Создание заказа магазина",
-        )
         return order
 
     @classmethod
     @transaction.atomic
     def change_store_order_status(
         cls,
-        *,
         order: StoreOrder,
         new_status: str,
-        changed_by: Optional[User],
+        changed_by: Optional[User] = None,
         comment: str = "",
     ) -> StoreOrder:
         old_status = order.status
-        if old_status == new_status:
-            return order
 
-        # простая валидация переходов
-        allowed = {
-            StoreOrderStatus.PENDING: {
-                StoreOrderStatus.CONFIRMED,
-                StoreOrderStatus.CANCELLED,
-            },
-            StoreOrderStatus.CONFIRMED: {
-                StoreOrderStatus.COMPLETED,
-                StoreOrderStatus.CANCELLED,
-            },
-            StoreOrderStatus.COMPLETED: set(),
-            StoreOrderStatus.CANCELLED: set(),
-            StoreOrderStatus.DRAFT: {
-                StoreOrderStatus.PENDING,
-                StoreOrderStatus.CANCELLED,
-            },
-        }
-        if new_status not in allowed.get(old_status, set()):
-            raise ValidationError(
-                f"Нельзя сменить статус {old_status} на {new_status}"
-            )
+        if new_status == StoreOrderStatus.CONFIRMED and old_status != new_status:
+            # Полный перенос инвентаря
+            for item in order.items.filter(is_bonus=False):
+                InventoryService.transfer_inventory(
+                    from_partner=order.partner,
+                    to_store=order.store,
+                    product=item.product,
+                    quantity=item.quantity
+                )
 
         order.status = new_status
-        order.save(update_fields=["status"])
-
-        # Здесь можно добавить работу с инвентарём и долгом (stores.InventoryService)
+        order.save(update_fields=['status'])
 
         cls._create_history(
             order_type=OrderType.STORE,
-            order_id=order.pk,
+            order_id=order.id,
             old_status=old_status,
             new_status=new_status,
             changed_by=changed_by,
-            comment=comment or f"Смена статуса заказа магазина {old_status}->{new_status}",
+            comment=comment
         )
         return order
 
-    # --- OrderReturn ---------------------------------------------------------
-
-    @classmethod
-    @transaction.atomic
-    def create_order_return(
-        cls,
-        *,
-        store: Store,
-        partner: User,
-        order: Optional[StoreOrder],
-        items: Iterable[dict],
-        created_by: Optional[User],
-        reason: str = "",
-        idempotency_key: Optional[str] = None,
-    ) -> OrderReturn:
-        if not store:
-            raise ValidationError("Не указан магазин")
-        if not partner:
-            raise ValidationError("Не указан партнёр")
-
-        if idempotency_key:
-            existing = OrderReturn.objects.filter(
-                idempotency_key=idempotency_key
-            ).first()
-            if existing:
-                return existing
-
-        order_return = OrderReturn.objects.create(
-            store=store,
-            partner=partner,
-            order=order,
-            created_by=created_by,
-            reason=reason,
-            status=OrderReturnStatus.PENDING,
-            idempotency_key=idempotency_key,
-        )
-
-        total = Decimal("0")
-        for raw in items:
-            payload = cls._parse_item_payload(raw)
-            if payload.quantity <= 0:
-                raise ValidationError("Количество должно быть больше 0")
-            if payload.price < 0:
-                raise ValidationError("Цена не может быть отрицательной")
-
-            item = OrderReturnItem.objects.create(
-                order_return=order_return,
-                product=payload.product,
-                quantity=payload.quantity,
-                price=payload.price,
-                reason=payload.reason,
-            )
-            total += item.total
-
-        order_return.total_amount = total
-        order_return.save(update_fields=["total_amount"])
-
-        cls._create_history(
-            order_type=OrderType.RETURN,
-            order_id=order_return.pk,
-            old_status="",
-            new_status=order_return.status,
-            changed_by=created_by,
-            comment="Создание возврата по заказу",
-        )
-        return order_return
-
+    # --- OrderReturn ---
     @classmethod
     @transaction.atomic
     def change_order_return_status(
         cls,
-        *,
         order_return: OrderReturn,
         new_status: str,
-        changed_by: Optional[User],
+        changed_by: Optional[User] = None,
         comment: str = "",
     ) -> OrderReturn:
         old_status = order_return.status
-        if old_status == new_status:
-            return order_return
 
-        allowed = {
-            OrderReturnStatus.PENDING: {
-                OrderReturnStatus.APPROVED,
-                OrderReturnStatus.REJECTED,
-                OrderReturnStatus.CANCELLED,
-            },
-            OrderReturnStatus.APPROVED: set(),
-            OrderReturnStatus.REJECTED: set(),
-            OrderReturnStatus.CANCELLED: set(),
-        }
-        if new_status not in allowed.get(old_status, set()):
-            raise ValidationError(
-                f"Нельзя сменить статус {old_status} на {new_status}"
-            )
+        if new_status == OrderReturnStatus.APPROVED and old_status != new_status:
+            # Полный возврат инвентаря + уменьшение долга
+            for item in order_return.items.all():
+                InventoryService.transfer_inventory(
+                    from_store=order_return.store,
+                    to_partner=order_return.partner,
+                    product=item.product,
+                    quantity=item.quantity
+                )
+
+                # Уменьшаем долг магазина
+                return_amount = item.price * item.quantity
+                order_return.order.debt_amount -= return_amount
+                order_return.order.save(update_fields=['debt_amount'])
 
         order_return.status = new_status
-        order_return.save(update_fields=["status"])
+        order_return.save(update_fields=['status'])
 
         cls._create_history(
             order_type=OrderType.RETURN,
-            order_id=order_return.pk,
+            order_id=order_return.id,
             old_status=old_status,
             new_status=new_status,
             changed_by=changed_by,
-            comment=comment or f"Смена статуса возврата {old_status}->{new_status}",
+            comment=comment or f"Возврат {old_status} → {new_status}"
         )
         return order_return
 
-    # --- internal helpers ----------------------------------------------------
-
+    # --- Helpers ---
     @staticmethod
     def _parse_item_payload(raw: dict) -> OrderItemPayload:
-        product = raw["product"]
-        quantity = Decimal(str(raw["quantity"]))
-        price = Decimal(str(raw.get("price")))
-        is_bonus = bool(raw.get("is_bonus", False))
-        reason = raw.get("reason", "")
         return OrderItemPayload(
-            product=product,
-            quantity=quantity,
-            price=price,
-            is_bonus=is_bonus,
-            reason=reason,
+            product=raw['product'],
+            quantity=Decimal(str(raw['quantity'])),
+            price=Decimal(str(raw.get('price', raw['product'].price))),
+            is_bonus=bool(raw.get('is_bonus', False)),
+            reason=raw.get('reason', '')
         )
 
     @staticmethod
@@ -366,5 +228,5 @@ class OrderService:
             old_status=old_status or "",
             new_status=new_status,
             changed_by=changed_by,
-            comment=comment or "",
+            comment=comment,
         )

@@ -275,3 +275,110 @@ class ProductionFinanceView(APIView):
         serializer = ProductionFinanceSummarySerializer(summary)
 
         return Response(serializer.data)
+
+class ProductionRecordViewSet(viewsets.ModelViewSet):
+    """
+    Производственные записи (день производства)
+    - Партнёр создаёт и редактирует
+    - Админ видит всё
+    """
+    queryset = ProductionRecord.objects.all().select_related('partner').prefetch_related('items__product')
+    serializer_class = ProductionRecordSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+
+        if user.role == 'admin' or user.is_superuser:
+            return qs
+        if user.role == 'partner':
+            return qs.filter(partner=user)
+
+        return qs.none()
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsPartnerUser()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        serializer.save(partner=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='from-suzerain')
+    @transaction.atomic
+    def from_suzerain(self, request, pk=None):
+        """
+        POST /api/products/production-records/{id}/from-suzerain/
+
+        {
+            "product_id": 42,
+            "suzerain_amount": "3.75"   // например, 3.75 кг фарша → сколько пельменей
+        }
+
+        Делает:
+        - Рассчитывает количество по Сюзерену
+        - Создаёт/обновляет ProductionItem
+        - Пересчитывает полную себестоимость (ингредиенты + умная наценка по популярности)
+        """
+        record: ProductionRecord = self.get_object()
+
+        product_id = request.data.get('product_id')
+        suzerain_amount_raw = request.data.get('suzerain_amount')
+
+        if not product_id or suzerain_amount_raw is None:
+            return Response(
+                {'error': 'product_id и suzerain_amount обязательны'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            suzerain_amount = Decimal(str(suzerain_amount_raw))
+            if suzerain_amount <= 0:
+                raise ValueError
+        except (ValueError, Decimal.InvalidOperation):
+            return Response(
+                {'error': 'suzerain_amount должен быть положительным числом'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        product: Product = get_object_or_404(Product, id=product_id)
+
+        # Расчёт количества по Сюзерену
+        quantity_produced = CostCalculator._calculate_quantity_from_suzerain(
+            product=product,
+            suzerain_amount=suzerain_amount
+        )
+
+        if quantity_produced <= 0:
+            return Response(
+                {'error': 'Не удалось рассчитать количество: нет связи с Сюзереном или proportion = 0'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Создаём или обновляем позицию
+        item, created = ProductionItem.objects.update_or_create(
+            record=record,
+            product=product,
+            defaults={
+                'suzerain_amount': suzerain_amount,
+                'quantity_produced': quantity_produced,
+            }
+        )
+
+        # Пересчитываем себестоимость (с умной наценкой!)
+        CostCalculator.calculate_production_item(item)
+
+        serializer = ProductionItemSerializer(item)
+
+        return Response(
+            {
+                'message': 'Расчёт от Сюзерена выполнен',
+                'created': created,
+                'item': serializer.data,
+                'quantity_produced': str(quantity_produced),
+                'cost_price_per_unit': str(item.cost_price),
+                'total_cost': str(item.total_cost),
+                'net_profit': str(item.net_profit),
+            }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        )

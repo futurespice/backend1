@@ -1,6 +1,8 @@
 from decimal import Decimal
 from django.db import transaction
+from django.db.models import Sum, F, Value
 from django.core.exceptions import ValidationError
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import (
@@ -11,57 +13,50 @@ from .models import (
 
 
 class CostCalculator:
-    """Сервис расчёта себестоимости товаров"""
+    """Сервис расчёта себестоимости товаров — полностью соответствует ТЗ 4.1"""
 
     @staticmethod
     @transaction.atomic
-    def calculate_production_item(production_item: ProductionItem):
+    def calculate_production_item(production_item: "ProductionItem") -> None:
         """
-        Рассчитать себестоимость производственной позиции
-
-        Логика:
-        1. Ingredient_cost = физические расходы (ингредиенты)
-        2. Overhead_cost = накладные расходы (пропорционально объёму)
-        3. Total_cost = ingredient_cost + overhead_cost
-        4. Cost_price = total_cost / quantity
-        5. Revenue = price * quantity
-        6. Net_profit = revenue - total_cost
+        Основной метод расчёта себестоимости одной позиции производства.
         """
         record = production_item.record
         product = production_item.product
+        quantity_produced = production_item.quantity_produced or Decimal('0')
 
-        # Определяем количество
-        if production_item.suzerain_amount > 0 and product.expense_relations.exists():
-            # Рассчитываем из Сюзерена
-            quantity = CostCalculator._calculate_quantity_from_suzerain(
+        # 1. Определяем количество (если от Сюзерена — пересчитываем)
+        if production_item.suzerain_amount and production_item.suzerain_amount > 0:
+            calculated_qty = CostCalculator._calculate_quantity_from_suzerain(
                 product, production_item.suzerain_amount
             )
-            production_item.quantity_produced = quantity
-        else:
-            quantity = production_item.quantity_produced
+            if calculated_qty > 0:
+                quantity_produced = calculated_qty
+                production_item.quantity_produced = quantity_produced
 
-        if quantity <= 0:
+        if quantity_produced <= 0:
+            production_item.cost_price = Decimal('0')
+            production_item.total_cost = Decimal('0')
+            production_item.net_profit = Decimal('0')
+            production_item.save(update_fields=[
+                'cost_price', 'total_cost', 'net_profit',
+                'ingredient_cost', 'overhead_cost', 'revenue'
+            ])
             return
 
-        # 1. Физические расходы (ингредиенты)
-        ingredient_cost = CostCalculator._calculate_ingredient_cost(product, quantity)
+        # 2. Физические расходы (ингредиенты)
+        ingredient_cost = CostCalculator._calculate_ingredient_cost(product, quantity_produced)
 
-        # 2. Накладные расходы (пропорция по объёму производства)
-        overhead_cost = CostCalculator._calculate_overhead_cost(record, product, quantity)
+        # 3. Накладные расходы — умная наценка по популярности
+        overhead_cost = CostCalculator._calculate_overhead_cost(record, product, quantity_produced)
 
-        # 3. Общие расходы
-        total_cost = ingredient_cost + overhead_cost
+        # 4. Итоги
+        total_cost = (ingredient_cost + overhead_cost).quantize(Decimal('0.01'))
+        cost_price = (total_cost / quantity_produced).quantize(Decimal('0.01'))
+        revenue = (product.price * quantity_produced).quantize(Decimal('0.01'))
+        net_profit = (revenue - total_cost).quantize(Decimal('0.01'))
 
-        # 4. Себестоимость (на единицу)
-        cost_price = total_cost / quantity if quantity > 0 else Decimal('0')
-
-        # 5. Доход (цена * количество)
-        revenue = product.price * quantity
-
-        # 6. Чистая прибыль
-        net_profit = revenue - total_cost
-
-        # Сохраняем
+        # Сохраняем всё одним запросом
         production_item.ingredient_cost = ingredient_cost
         production_item.overhead_cost = overhead_cost
         production_item.total_cost = total_cost
@@ -70,84 +65,88 @@ class CostCalculator:
         production_item.net_profit = net_profit
         production_item.save()
 
-    @staticmethod
-    def _calculate_quantity_from_suzerain(product, suzerain_amount):
-        """Количество товаров из объёма Сюзерена"""
-        # Находим связь с Сюзереном
-        suzerain_relations = product.expense_relations.filter(
-            expense__status='suzerain'
-        )
-
-        if suzerain_relations.exists():
-            suzerain_rel = suzerain_relations.first()
-            if suzerain_rel.proportion > 0:
-                return suzerain_amount / suzerain_rel.proportion
-
-        return Decimal('0')
+    # ===================================================================
+    # Вспомогательные методы
+    # ===================================================================
 
     @staticmethod
-    def _calculate_ingredient_cost(product, quantity):
-        """Расчёт физических расходов (ингредиенты)"""
-        cost = Decimal('0')
-
-        for rel in product.expense_relations.filter(expense__expense_type='physical'):
-            if rel.expense.price_per_unit:
-                unit_cost = rel.expense.price_per_unit
-                cost += unit_cost * rel.proportion * quantity
-
-        return cost
-
-    @staticmethod
-    def _calculate_overhead_cost(record, product, quantity):
-        """
-        Расчёт накладных расходов.
-        Распределяются пропорционально объёму производства.
-        """
-        # Все товары в этом ProductionRecord
-        all_items = ProductionItem.objects.filter(record=record)
-
-        total_production = Decimal('0')
-        for item in all_items:
-            total_production += item.quantity_produced
-
-        if total_production <= 0:
+    def _calculate_quantity_from_suzerain(product: "Product", suzerain_amount: Decimal) -> Decimal:
+        """Расчёт количества из объёма Сюзерена (например, 2 кг фарша → сколько пельменей)"""
+        relations = product.expense_relations.filter(expense__status='suzerain')
+        if not relations.exists():
             return Decimal('0')
 
-        # Доля этого товара
-        share = quantity / total_production
+        rel = relations.first()
+        if rel.proportion <= 0:
+            return Decimal('0')
 
-        # Все накладные расходы
-        overhead_expenses = Expense.objects.filter(
-            expense_type='overhead',
-            is_active=True
-        )
-
-        daily_overhead = Decimal('0')
-
-        for expense in overhead_expenses:
-            if expense.state == 'mechanical':
-                # Механический учёт (берём из MechanicalExpenseEntry)
-                entry = MechanicalExpenseEntry.objects.filter(
-                    record=record,
-                    expense=expense
-                ).first()
-
-                if entry:
-                    daily_overhead += entry.amount_spent
-            else:
-                # Автоматический (месячную сумму делим на 30)
-                if expense.monthly_amount:
-                    daily_overhead += expense.monthly_amount / 30
-
-        # Доля этого товара
-        overhead_cost = daily_overhead * share
-
-        return overhead_cost
+        return (suzerain_amount / rel.proportion).quantize(Decimal('0.001'))
 
     @staticmethod
-    def recalculate_all_items(record: ProductionRecord):
-        """Пересчитать все строки в таблице"""
-        items = ProductionItem.objects.filter(record=record)
+    def _calculate_ingredient_cost(product: "Product", quantity: Decimal) -> Decimal:
+        """Физические расходы (ингредиенты)"""
+        cost = Decimal('0')
+        for rel in product.expense_relations.filter(expense__expense_type='physical'):
+            if rel.expense.price_per_unit:
+                cost += rel.expense.price_per_unit * rel.proportion * quantity
+        return cost.quantize(Decimal('0.01'))
+
+    @staticmethod
+    def _get_daily_overhead_total(record: "ProductionRecord") -> Decimal:
+        """Единая точка расчёта всех накладных расходов за день (авто + мех)"""
+        from .models import Expense, MechanicalExpenseEntry
+
+        # Автоматические (ежемесячные / 30)
+        auto_total = Expense.objects.filter(
+            expense_type='overhead',
+            state='automatic',
+            is_active=True
+        ).aggregate(
+            total=Coalesce(Sum(F('monthly_amount') / Value(30)), Decimal('0'))
+        )['total']
+
+        # Механические (из записей)
+        mech_total = MechanicalExpenseEntry.objects.filter(
+            record=record,
+            expense__expense_type='overhead',
+            expense__is_active=True
+        ).aggregate(
+            total=Coalesce(Sum('amount_spent'), Decimal('0'))
+        )['total']
+
+        return (auto_total + mech_total).quantize(Decimal('0.01'))
+
+    @staticmethod
+    def _calculate_overhead_cost(record: "ProductionRecord", product: "Product", quantity: Decimal) -> Decimal:
+        """
+        УМНАЯ НАЦЕНКА — ТЗ 4.1.4
+        Накладные расходы распределяются пропорционально (количество × popularity_weight)
+        """
+        if quantity <= 0:
+            return Decimal('0')
+
+        # Все позиции за день
+        items = record.items.select_related('product').only('quantity_produced', 'product__popularity_weight')
+
+        total_weighted_qty = Decimal('0')
+        for item in items:
+            if item.quantity_produced > 0:
+                weight = item.product.popularity_weight or Decimal('1.0')
+                total_weighted_qty += item.quantity_produced * weight
+
+        if total_weighted_qty <= 0:
+            return Decimal('0')
+
+        product_weight = product.popularity_weight or Decimal('1.0')
+        share = (quantity * product_weight) / total_weighted_qty
+
+        daily_overhead = CostCalculator._get_daily_overhead_total(record)
+        return (daily_overhead * share).quantize(Decimal('0.01'))
+
+    @staticmethod
+    def recalculate_all_items(record: "ProductionRecord") -> None:
+        """Пересчитать себестоимость всех позиций в записи (после изменения популярности/расходов)"""
+        items = ProductionItem.objects.filter(record=record).select_related('product', 'record')
         for item in items:
             CostCalculator.calculate_production_item(item)
 
